@@ -1,0 +1,285 @@
+openapi: 3.0.3
+info:
+  title: Marketplace API
+  version: 1.0.0
+  description: >
+    Навчальний API до ДЗ №9 курсового проєкту: контракт Marketplace API
+    (товари та замовлення) із cursor-пагінацією, Idempotency-Key на
+    створенні замовлення та problem+json (RFC 9457) як єдиним форматом
+    помилок. Реалізація (варіант Б) — сервер на NestJS, де кожен запит і
+    кожна відповідь звіряються з цією спекою через express-openapi-validator.
+servers:
+  - url: http://localhost:3000
+    description: Локальний застосунок
+# Авторизації в API поки свідомо немає — це майбутнє ДЗ.
+security: []
+tags:
+  - name: products
+    description: Каталог товарів
+  - name: orders
+    description: Замовлення покупців
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      summary: Список товарів
+      description: Сторінка каталогу товарів із cursor-пагінацією.
+      tags: [products]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Сторінка товарів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /products/{id}:
+    get:
+      operationId: getProduct
+      summary: Отримати товар за ідентифікатором
+      tags: [products]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Товар
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /orders:
+    get:
+      operationId: listOrders
+      summary: Список замовлень
+      description: Сторінка замовлень із cursor-пагінацією.
+      tags: [orders]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Сторінка замовлень
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      operationId: createOrder
+      summary: Створити замовлення
+      tags: [orders]
+      parameters:
+        # Навмисно інлайн, а не $ref: `redocly bundle` (без --dereferenced)
+        # лишає локальні $ref нерозгорнутими, а acceptance-скрипт із task.md
+        # читає spec.json напряму — parameters[].in/name мають бути тут.
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >
+            Ключ ідемпотентності клієнтської спроби створення замовлення.
+            Якщо клієнт повторює POST із тим самим значенням Idempotency-Key і
+            тим самим тілом запиту (наприклад, після таймауту чи обриву
+            зʼєднання, коли невідомо, чи дійшла попередня відповідь), сервер
+            має трактувати це як ПОВТОР тієї самої спроби, а не як нове
+            замовлення, і повернути ту саму відповідь.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Замовлення створено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Отримати замовлення за ідентифікатором
+      tags: [orders]
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Замовлення
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Максимальна кількість елементів на сторінці.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >
+        Непрозорий токен курсора зі значення next_cursor попередньої
+        відповіді. Клієнт не повинен розбирати чи формувати його сам —
+        лише передавати назад тим, яким отримав.
+      schema:
+        type: string
+    ProductId:
+      name: id
+      in: path
+      required: true
+      description: Ідентифікатор товару.
+      schema:
+        type: string
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: Ідентифікатор замовлення.
+      schema:
+        type: string
+  schemas:
+    Product:
+      type: object
+      required: [id, name, price_cents]
+      properties:
+        id:
+          type: string
+          example: p1
+        name:
+          type: string
+          example: Клавіатура механічна
+        price_cents:
+          type: integer
+          description: Ціна в копійках — без float.
+          example: 129900
+    ProductPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Токен наступної сторінки; null = сторінок більше немає.
+          example: null
+    OrderItem:
+      type: object
+      required: [product_id, quantity]
+      properties:
+        product_id:
+          type: string
+          example: p1
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+    Order:
+      type: object
+      required: [id, items, total_cents, status, created_at]
+      properties:
+        id:
+          type: string
+          example: o1
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        total_cents:
+          type: integer
+          description: Сума замовлення в копійках — без float.
+          example: 129900
+        status:
+          type: string
+          enum: [new]
+          example: new
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-08-20T09:12:00.000Z'
+    OrderPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Токен наступної сторінки; null = сторінок більше немає.
+          example: null
+    CreateOrderRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+    Problem:
+      type: object
+      description: RFC 9457 problem+json — єдина форма помилки для всіх 4xx.
+      required: [type, title, status, detail, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI типу помилки.
+          example: https://api.marketplace.example/problems/404
+        title:
+          type: string
+          description: Коротка людська назва класу помилки.
+          example: Ресурс не знайдено
+        status:
+          type: integer
+          description: HTTP-код відповіді.
+          example: 404
+        detail:
+          type: string
+          description: Що саме пішло не так у цьому конкретному випадку.
+          example: 'замовлення "o99" не знайдено'
+        instance:
+          type: string
+          description: Посилання на конкретний випадок (шлях запиту).
+          example: /orders/o99
+  responses:
+    BadRequest:
+      description: Некоректний запит (валідація не пройшла)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Ресурс не знайдено
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
