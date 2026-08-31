@@ -1,5 +1,5 @@
 # hw-09 — Marketplace API: контракт + рантайм-валідація
-
+ 
 Обраний варіант: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
