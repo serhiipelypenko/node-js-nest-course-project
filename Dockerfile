@@ -19,8 +19,9 @@ RUN npm run build
 # немає.
 FROM node:22-slim AS runner
 
-ENV NODE_ENV=production
-
+# Свідомо НЕ ставимо жодного ENV: `docker inspect --format '{{.Config.Env}}'`
+# має показувати лише змінні базового образу (PATH, NODE_VERSION, YARN_VERSION),
+# жодних паролів чи прапорців. NODE_ENV передається ззовні (compose / -e).
 WORKDIR /app
 
 COPY package*.json ./
@@ -30,6 +31,9 @@ COPY --from=builder /app/dist ./dist
 # express-openapi-validator валідує запити/відповіді проти цієї спеки в рантаймі,
 # тож вона має бути доступна поруч із dist, а не лише на етапі збірки.
 COPY openapi ./openapi
+# .env.example — це контракт, він У образі. А от .env і secrets/ сюди НЕ
+# потрапляють: їх вирізає .dockerignore.
+COPY .env.example ./
 
 # Non-root: офіційний node-образ вже містить користувача "node" (uid 1000).
 USER node

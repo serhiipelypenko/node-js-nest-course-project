@@ -1,0 +1,20 @@
+# Секрети — НІКОЛИ в образ
+.env
+.env.*
+!.env.example
+secrets/
+
+# Непотрібне у збірці
+node_modules/
+dist/
+spec.json
+*.log
+.git/
+.gitignore
+.idea/
+.DS_Store
+README.md
+secrets/task.md
+CLAUDE.md
+rotate.sh
+docker-compose.yml

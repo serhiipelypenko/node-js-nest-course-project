@@ -1,11 +1,39 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      # пароль superuser-а postgres; роль застосунку `marketplace` створює init.sql
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
     image: marketplace-api:latest
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
+      # у мережі compose хост БД — імʼя сервісу `db`; пароля в DSN немає
+      DB_URL: postgres://marketplace@db:5432/marketplace
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає
+      - ./secrets/db_password:/run/secrets/db_password:ro
+
+volumes:
+  db_data:
