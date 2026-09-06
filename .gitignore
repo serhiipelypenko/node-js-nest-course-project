@@ -5,6 +5,7 @@ spec.json
 .idea
 .DS_Store
 
-# Секрети: у git лежить лише .env.example
+# Секрети: у git лежать лише *.example
 .env
-secrets/
+secrets/*
+!secrets/*.example
