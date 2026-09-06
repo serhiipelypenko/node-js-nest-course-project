@@ -1,6 +1,11 @@
-# hw-09 — Marketplace API: контракт + рантайм-валідація
- 
-Обраний варіант: **Б — runtime-валідація на кордоні**.
+# Marketplace API — курсовий проєкт
+
+- **hw-09** — OpenAPI-контракт + рантайм-валідація на кордоні (варіант **Б**).
+- **hw-11** — конфіг-скелет: `process.env` → zod-схема (fail-fast) → `ConfigService`,
+  секрети поза git і поза docker-образом, ротація пароля БД без рестарту
+  (див. розділ [Configuration](#configuration)).
+
+Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
 який валідує кожен запит і кожну відповідь проти `openapi/openapi.yaml`
@@ -47,12 +52,78 @@ npm install
 ## Запуск
 
 ```bash
-npm run build
-npm start
+cp .env.example .env                              # локальні змінні (у .gitignore)
+mkdir -p secrets && printf '%s' dev_secret_pw > secrets/db_password
+docker compose up -d db                           # локальний Postgres
+npm start                                         # = npm run build && node dist/main.js
 # або для розробки: npm run start:dev
 ```
 
-Сервер піднімається на `http://localhost:3000` (можна змінити через `PORT`).
+Сервер піднімається на `http://localhost:3000` (порт береться зі схеми конфіга).
+
+---
+
+## Configuration
+
+### Змінні середовища
+
+Джерело правди — zod-схема `src/config/env.schema.ts`. Контракт для людей —
+`.env.example` (у git; реальний `.env` — у `.gitignore`). `npm run check:env`
+звіряє їх і падає з `exit 1`, якщо файл відстав від схеми.
+
+| Змінна             | Тип / формат                         | Обовʼязкова | Дефолт                    | Призначення |
+|--------------------|--------------------------------------|-------------|---------------------------|-------------|
+| `NODE_ENV`         | `development \| production \| test`  | ні          | `development`             | режим роботи |
+| `PORT`             | ціле 1–65535                         | ні          | `3000`                    | порт HTTP-сервера |
+| `DB_URL`           | URL `postgres://user@host:port/db`   | **так**     | —                         | DSN Postgres **без пароля** |
+| `DB_PASSWORD_FILE` | шлях до файла                        | ні          | `./secrets/db_password`   | файл із паролем ролі БД |
+
+Пароль БД — **не змінна середовища, а файл**. `src/database/database.module.ts`
+передає в `pg.Pool` поле `password` як `async`-функцію, що перечитує цей файл на
+**кожне нове зʼєднання**. Це і робить ротацію без рестарту можливою.
+
+Зламана/відсутня обовʼязкова змінна = `validate()` кидає `Error` зі списком усіх
+проблем одразу → `bootstrap().catch()` у `main.ts` друкує причину і робить
+`process.exit(1)`. Процес не стартує — помилка видно на старті, а не на першому
+запиті в проді.
+
+### Секрети поза git і поза образом
+
+- `.gitignore`: `.env`, `secrets/` (у git лежить лише `.env.example`).
+- `.dockerignore`: `.env`, `.env.*`, `secrets/` (у образ потрапляє лише `.env.example`).
+- `Dockerfile` (runner-стадія) **не задає жодного `ENV`** — `docker inspect` показує
+  тільки змінні базового образу.
+
+### Ротація пароля БД без рестарту
+
+```bash
+# 0. Постгрес і застосунок працюють
+docker compose up -d db
+npm start                                   # окремий термінал
+curl -s localhost:3000/health               # запамʼятай uptime_seconds і pid
+curl -s localhost:3000/health/db            # -> {"db":"ok"}
+
+# 1. Ротація
+bash rotate.sh
+#   1/3  ALTER ROLE marketplace WITH PASSWORD '<new>'   — БД знає новий пароль
+#   2/3  printf '%s' '<new>' > secrets/db_password       — файл-секрет оновлено (той самий inode)
+#   3/3  SELECT pg_terminate_backend(...) для ролі       — старі зʼєднання розірвано
+
+# 2. Перевірка: сервіс живий, процес той самий
+curl -s localhost:3000/health/db            # -> {"db":"ok"} (нове зʼєднання, новий пароль з файла)
+curl -s localhost:3000/health               # uptime_seconds БІЛЬШИЙ, pid ТОЙ САМИЙ
+```
+
+Чому працює: `pg.Pool` викликає `password: async () => readFile(...)` на кожне нове
+зʼєднання; крок 3 рве старі конекти, пул відкриває нові — вже з новим паролем із
+файла. `pool.on('error')` у `database.module.ts` гасить подію від розірваних
+idle-зʼєднань, інакше процес би впав.
+
+### Запуск усього в Docker
+
+```bash
+docker compose up --build        # db + api; api читає /run/secrets/db_password (bind-mount)
+```
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
@@ -108,6 +179,4 @@ curl -i http://localhost:3000/products/does-not-exist
 
 ## Docker
 
-```bash
-docker compose up --build
-```
+Див. розділ [Configuration → Запуск усього в Docker](#запуск-усього-в-docker).

@@ -4,3 +4,7 @@ spec.json
 *.log
 .idea
 .DS_Store
+
+# Секрети: у git лежить лише .env.example
+.env
+secrets/
