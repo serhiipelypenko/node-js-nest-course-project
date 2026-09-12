@@ -4,6 +4,9 @@
 - **hw-11** — конфіг-скелет: `process.env` → zod-схема (fail-fast) → `ConfigService`,
   секрети поза git і поза docker-образом, ротація пароля БД без рестарту
   (див. розділ [Configuration](#configuration)).
+- **hw-12** — дата-шар: схема (`db/schema.sql`), seed на 300k рядків
+  (`db/seed.sql`), три повільні запити + індекси, що їх лікують, і звіт
+  EXPLAIN до/після (див. розділ [Дата-шар (hw-12)](#дата-шар-hw-12)).
 
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
@@ -53,7 +56,7 @@ npm install
 
 ```bash
 cp .env.example .env                              # локальні змінні (у .gitignore)
-mkdir -p secrets && printf '%s' dev_secret_pw > secrets/db_password
+cp secrets/db_password.example secrets/db_password # файл-секрет (у .gitignore)
 docker compose up -d db                           # локальний Postgres
 npm start                                         # = npm run build && node dist/main.js
 # або для розробки: npm run start:dev
@@ -71,12 +74,17 @@ npm start                                         # = npm run build && node dist
 `.env.example` (у git; реальний `.env` — у `.gitignore`). `npm run check:env`
 звіряє їх і падає з `exit 1`, якщо файл відстав від схеми.
 
-| Змінна             | Тип / формат                         | Обовʼязкова | Дефолт                    | Призначення |
-|--------------------|--------------------------------------|-------------|---------------------------|-------------|
-| `NODE_ENV`         | `development \| production \| test`  | ні          | `development`             | режим роботи |
-| `PORT`             | ціле 1–65535                         | ні          | `3000`                    | порт HTTP-сервера |
-| `DB_URL`           | URL `postgres://user@host:port/db`   | **так**     | —                         | DSN Postgres **без пароля** |
-| `DB_PASSWORD_FILE` | шлях до файла                        | ні          | `./secrets/db_password`   | файл із паролем ролі БД |
+| Змінна             | Тип / формат                         | Обовʼязкова | Дефолт                    | Джерело значення | Призначення |
+|--------------------|--------------------------------------|-------------|---------------------------|------------------|-------------|
+| `NODE_ENV`         | `development \| production \| test`  | ні          | `development`             | `.env` / оточення процесу | режим роботи |
+| `PORT`             | ціле 1–65535                         | ні          | `3000`                    | `.env` / оточення процесу | порт HTTP-сервера |
+| `DB_URL`           | URL `postgres://user@host:port/db`   | **так**     | —                         | **сховище конфігурації (hw-11)** — оточення `dev` і `prod`; у git лише фейковий рядок у `.env.example` | DSN Postgres до бази hw-12 **без пароля** |
+| `DB_PASSWORD_FILE` | шлях до файла                        | ні          | `./secrets/db_password`   | `.env` / оточення процесу (сам пароль — у файлі-секреті, не в git) | файл із паролем ролі БД |
+
+`DB_URL` — це та сама змінна з hw-11; для hw-12 змінилося лише **значення**:
+воно вказує на базу цього ДЗ. Нового env-файла з рядком підключення не
+зʼявилося — джерело правди для `dev`/`prod` — сховище конфігурації, а
+`.env.example` містить лише зразок із фейковим паролем.
 
 Пароль БД — **не змінна середовища, а файл**. `src/database/database.module.ts`
 передає в `pg.Pool` поле `password` як `async`-функцію, що перечитує цей файл на
@@ -124,6 +132,69 @@ idle-зʼєднань, інакше процес би впав.
 ```bash
 docker compose up --build        # db + api; api читає /run/secrets/db_password (bind-mount)
 ```
+
+## Дата-шар (hw-12)
+
+Схема, seed і докази швидкості під обсягом. Головна таблиця — **`orders`**
+(300 000 рядків). Усі файли — у `db/`:
+
+| Файл | Призначення |
+|------|-------------|
+| `db/schema.sql` | 4 таблиці (`users`, `products`, `orders`, `order_items`), 3 FOREIGN KEY, `CHECK`, `numeric`/`timestamptz` |
+| `db/seed.sql` | генерація даних через `generate_series` (300k `orders`), перекошені розподіли, у кінці `VACUUM (ANALYZE)` |
+| `db/queries/q1.sql` … `q3.sql` | по одному реальному запиту API на файл |
+| `db/indexes.sql` | 3 індекси (складений + partial + expression), що лікують усі три запити |
+| `db/OPTIMIZATIONS.md` | EXPLAIN (ANALYZE, BUFFERS) до/після для кожного запиту + пояснення |
+
+### Підняти Postgres (працює на свіжому клоні, без правок файлів)
+
+```bash
+docker compose up -d db --wait
+```
+
+Дев-креденшели стенду зафіксовані в `docker-compose.yml` + `scripts/init.sql`
+(роль `marketplace` / пароль `dev_secret_pw` / база `marketplace`). Це окремий
+шлях від застосунку: сервіс бере `DB_URL` зі сховища конфігурації, а цей
+локальний стенд потрібен грейдеру для чистого клону.
+
+### Підключитись (psql)
+
+```bash
+docker compose exec db psql -U marketplace -d marketplace
+```
+
+Це інтерактивний сеанс (`marketplace=#`), вихід — `\q` або `Ctrl+D`. Прапорець
+`-T` тут НЕ потрібен: він вимикає термінал і має сенс лише разом із `-c`/`-f`
+(див. «Прогнати всі кроки»), інакше psql просто мовчки чекає stdin.
+
+`./db` змонтовано в контейнер як `/db` (read-only), тож `-f /db/schema.sql`
+працює без host-клієнта. Якщо psql є на хості — рівнозначно:
+`psql "postgresql://marketplace:dev_secret_pw@localhost:5432/marketplace"`.
+
+### Прогнати всі кроки
+
+```bash
+PSQL='docker compose exec -T db psql -U marketplace -d marketplace'
+
+# 1. схема на чисту базу
+$PSQL -f /db/schema.sql
+
+# 2. seed (~13 c) — 300k рядків у orders, у кінці VACUUM (ANALYZE)
+$PSQL -f /db/seed.sql
+
+# 3. EXPLAIN «до» — кожен запит дає Seq Scan
+for q in q1 q2 q3; do $PSQL -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/$q.sql)"; done
+
+# 4. індекси + свіжа статистика
+$PSQL -f /db/indexes.sql
+$PSQL -c "ANALYZE;"
+
+# 5. EXPLAIN «після» — Index / Index Only / Bitmap Index Scan, без Seq Scan
+for q in q1 q2 q3; do $PSQL -c "EXPLAIN (ANALYZE, BUFFERS) $(cat db/queries/$q.sql)"; done
+```
+
+Повний цикл із нуля: `docker compose down -v && docker compose up -d db --wait`,
+далі кроки 1–5.
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
