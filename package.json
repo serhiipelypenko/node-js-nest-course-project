@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -10,7 +10,14 @@
     "check:env": "node scripts/check-env-example.mjs",
     "lint:spec": "redocly lint openapi/openapi.yaml",
     "bundle:spec": "redocly bundle openapi/openapi.yaml -o spec.json",
-    "check:spec": "npm run bundle:spec && node scripts/check-spec.cjs"
+    "check:spec": "npm run bundle:spec && node scripts/check-spec.cjs",
+    "migration:generate": "typeorm migration:generate -d dist/data-source.js",
+    "migrate": "bash scripts/with-secrets.sh dev typeorm migration:run -d dist/data-source.js",
+    "migrate:show": "bash scripts/with-secrets.sh dev typeorm migration:show -d dist/data-source.js",
+    "migrate:revert": "bash scripts/with-secrets.sh dev typeorm migration:revert -d dist/data-source.js",
+    "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
+    "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
@@ -21,6 +28,7 @@
     "pg": "8.13.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
+    "typeorm": "0.3.31",
     "zod": "3.23.8"
   },
   "devDependencies": {

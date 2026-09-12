@@ -9,3 +9,7 @@ spec.json
 .env
 secrets/*
 !secrets/*.example
+
+# hw-13: креденшели машини для scripts/with-secrets.sh (infisical run) —
+# ключ від сховища, не сам секрет, але теж поза git.
+.secrets/
