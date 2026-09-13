@@ -1,10 +1,17 @@
-import { Column, Entity, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
+import { Check, Column, Entity, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
+import { numericTransformer } from './numeric.transformer';
 import { Order } from './order.entity';
 
 // Покупці. Відповідає db/schema.sql (hw-12) 1:1: bigint IDENTITY (не serial —
 // без окремого об'єкта-sequence зі своїми правами), email — природний ключ
 // входу, тому NOT NULL UNIQUE.
+// balance (hw-14) — гроші покупця, numeric(12,2) як і всі суми в домені.
+// Дефолт навмисно надлишковий (1000000.00): у демо конкурентності hw-14
+// саме stock товару має бути дефіцитом, що обмежує число успішних чекаутів,
+// а не випадковий брак коштів у покупця — інакше число успішних із гонки
+// стане залежати від порядку виконання, а не лишиться рівно stock.
 @Entity('users')
+@Check('"balance" >= 0')
 export class User {
   @PrimaryGeneratedColumn('identity', {
     type: 'bigint',
@@ -17,6 +24,15 @@ export class User {
 
   @Column({ type: 'text', name: 'full_name' })
   fullName: string;
+
+  @Column({
+    type: 'numeric',
+    precision: 12,
+    scale: 2,
+    default: 1000000,
+    transformer: numericTransformer,
+  })
+  balance: number;
 
   // Звичайний @Column, НЕ @CreateDateColumn: TypeORM примусово підставляв би
   // new Date() при кожному save(), а seed.ts свідомо ставить старі дати
