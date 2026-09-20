@@ -13,3 +13,6 @@ secrets/*
 # hw-13: креденшели машини для scripts/with-secrets.sh (infisical run) —
 # ключ від сховища, не сам секрет, але теж поза git.
 .secrets/
+
+# hw-15: дампи бази (scripts/backup.sh) — дані, не код
+backups/

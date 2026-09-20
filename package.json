@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
