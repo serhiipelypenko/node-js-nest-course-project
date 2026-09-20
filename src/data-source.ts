@@ -11,6 +11,7 @@
 // й ротацію пароля-файлу, цей — одноразові CLI-інструменти дата-шару.
 import 'reflect-metadata';
 import { DataSource, DataSourceOptions } from 'typeorm';
+import { JobQueue } from './entities/job-queue.entity';
 import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-item.entity';
 import { Product } from './entities/product.entity';
@@ -23,7 +24,7 @@ export const dataSourceOptions: DataSourceOptions = {
   username: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  entities: [User, Product, Order, OrderItem],
+  entities: [User, Product, Order, OrderItem, JobQueue],
   migrations: ['dist/migrations/*.js'],
   synchronize: false,
 };

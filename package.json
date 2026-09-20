@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -17,7 +17,10 @@
     "migrate:revert": "bash scripts/with-secrets.sh dev typeorm migration:revert -d dist/data-source.js",
     "seed": "bash scripts/with-secrets.sh dev node dist/seed.js",
     "demo:nplus1": "bash scripts/with-secrets.sh dev node dist/demo-nplus1.js",
-    "report": "bash scripts/with-secrets.sh dev node dist/report.js"
+    "report": "bash scripts/with-secrets.sh dev node dist/report.js",
+    "demo:race": "bash scripts/with-secrets.sh dev node dist/demo-race.js",
+    "demo:workers": "bash scripts/with-secrets.sh dev node dist/demo-workers.js",
+    "demo:retry": "bash scripts/with-secrets.sh dev node dist/demo-retry.js"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
