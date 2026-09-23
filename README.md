@@ -608,9 +608,11 @@ npm run broker:down    # прибрати обидва контейнери
 
 ### Локальний еквівалент CI-гейту (той самий, що в `.github/workflows/contract.yml`)
 
-Спершу «не можна», потім, після верифікації і тега `prod`, — «можна» (`to=prod`
-чесно лишається `unknown`, поки жодну версію провайдера не позначено як
-`prod` — реальний прогін нижче, 23.09.2026):
+Порядок кроків обовʼязковий: спершу публікація й **успішна** верифікація, і лише ПІСЛЯ неї —
+`can-i-deploy` між кроками "verify" і "tag prod" все одно чесно лишається
+`unknown` (доказ, що причина саме відсутній тег `prod`, а не відсутня
+верифікація); тег `prod` переводить ту саму відповідь у `true` (реальний
+прогін нижче, 23.09.2026):
 
 ```bash
 npm run test:contract                    # генерує pacts/marketplace-web-marketplace-api.json
@@ -620,12 +622,14 @@ curl -s -X PUT 'http://127.0.0.1:9292/pacts/provider/marketplace-api/consumer/ma
   -H 'Content-Type: application/json' -d @pacts/marketplace-web-marketplace-api.json -o /dev/null -w '%{http_code}\n'
 # -> 201
 
+PACT_BROKER_URL=http://127.0.0.1:9292 PROVIDER_VERSION=1.0.0 npm run verify:provider   # exit 0, публікує результат
+
 curl -s 'http://127.0.0.1:9292/can-i-deploy?pacticipant=marketplace-web&version=1.0.0&to=prod'
 # -> {"deployable":null,"reason":"There is no verified pact between version 1.0.0 of marketplace-web
 #     and the latest version of marketplace-api with tag prod (no such version exists)",
-#     "success":0,"failed":0,"unknown":1}                                    ← верифікації ще немає
-
-PACT_BROKER_URL=http://127.0.0.1:9292 PROVIDER_VERSION=1.0.0 npm run verify:provider   # exit 0, публікує результат
+#     "success":0,"failed":0,"unknown":1}
+# ВЕРИФІКАЦІЯ ВЖЕ ПРОЙШЛА (крок вище — exit 0), але деплой все ще "unknown":
+# бракує САМЕ тега prod, а не результату верифікації.
 
 curl -s -X PUT 'http://127.0.0.1:9292/pacticipants/marketplace-api/versions/1.0.0/tags/prod' \
   -H 'Content-Type: application/json' -o /dev/null -w '%{http_code}\n'
