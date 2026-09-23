@@ -16,3 +16,7 @@ secrets/*
 
 # hw-15: дампи бази (scripts/backup.sh) — дані, не код
 backups/
+
+# hw-16: контракт генерується consumer-тестом (npm run test:contract) і
+# в CI, і локально — не код, не потребує версіонування
+pacts/

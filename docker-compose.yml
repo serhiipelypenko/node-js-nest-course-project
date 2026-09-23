@@ -58,5 +58,37 @@ services:
       # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає
       - ./secrets/db_password:/run/secrets/db_password:ro
 
+  # hw-16: Pact Broker — контракт живе тут, а не в pacts/*.json консюмера;
+  # can-i-deploy питає саме цей сервіс. Власна маленька база, ІЗОЛЬОВАНА від
+  # `db` застосунку: брокер не має жодного стосунку до домену Marketplace.
+  pact-broker-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: broker
+      POSTGRES_PASSWORD: broker
+      POSTGRES_DB: broker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U broker -d broker"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  pact-broker:
+    image: pactfoundation/pact-broker:2.142.0-pactbroker2.120.0
+    ports:
+      - "9292:9292"
+    environment:
+      PACT_BROKER_DATABASE_URL: postgres://broker:broker@pact-broker-db/broker
+      PACT_BROKER_ALLOW_PUBLIC_READ: "true"
+    depends_on:
+      pact-broker-db:
+        condition: service_healthy
+    healthcheck:
+      # ВАЖЛИВО 127.0.0.1, не localhost: у контейнері localhost -> ::1, а puma слухає лише IPv4
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9292/diagnostic/status/heartbeat"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
 volumes:
   db_data:

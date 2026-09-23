@@ -1,0 +1,74 @@
+# hw-16: Pact contract gate. Джоба "contract" сама піднімає лише
+# pact-broker (+ його власну pact-broker-db) із docker-compose.yml курсового
+# — сервіси `db`/`pgbouncer`/`api` тут не потрібні: contract-тести піднімають
+# СВІЙ Postgres через testcontainers (test/testkit/pg-container.ts).
+#
+# Порядок кроків копіює "Локальний еквівалент гейта" з README:
+#   consumer (генерує pacts/*.json) -> publish -> provider verify
+#   (publishVerificationResult: true) -> can-i-deploy.
+#
+# PACT_BROKER_URL/PACT_BROKER_TOKEN — лише process.env:
+# тут значення з GitHub secrets, локально — той самий код читає їх зі
+# сховища hw-11 через scripts/with-secrets.sh.
+name: Contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      PACT_BROKER_URL: http://127.0.0.1:9292
+      PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      PROVIDER_VERSION: ${{ github.sha }}
+      GITHUB_REF_NAME: ${{ github.ref_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Підняти Pact Broker (сервіс із compose курсового)
+        run: docker compose up -d --wait pact-broker
+
+      - name: Consumer contract (jest test:contract -> pacts/*.json)
+        run: npm run test:contract
+
+      - name: Публікація контракту в брокер
+        run: |
+          set -euo pipefail
+          FILE="$(ls pacts/*.json | head -n1)"
+          echo "публікуємо $FILE як marketplace-web@$PROVIDER_VERSION"
+          curl -sf -X PUT \
+            "$PACT_BROKER_URL/pacts/provider/marketplace-api/consumer/marketplace-web/version/$PROVIDER_VERSION" \
+            -H 'Content-Type: application/json' \
+            -d @"$FILE"
+
+      - name: Provider verification (публікує результат назад у брокер)
+        run: npm run verify:provider
+
+      - name: can-i-deploy
+        run: |
+          set -euo pipefail
+          RESP="$(curl -s "$PACT_BROKER_URL/can-i-deploy?pacticipant=marketplace-web&version=$PROVIDER_VERSION&to=prod")"
+          echo "$RESP"
+          node -e '
+            const r = JSON.parse(process.argv[1]);
+            console.log("summary:", JSON.stringify(r.summary));
+            if (r.summary.deployable !== true) {
+              console.error("can-i-deploy: deployable !== true — до першого тега prod на версії провайдера це очікувано (unknown), див. README");
+              process.exit(1);
+            }
+          ' "$RESP"
+
+      - name: Прибрати брокер
+        if: always()
+        run: docker compose rm -sf pact-broker pact-broker-db
