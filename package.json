@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -20,7 +20,13 @@
     "report": "bash scripts/with-secrets.sh dev node dist/report.js",
     "demo:race": "bash scripts/with-secrets.sh dev node dist/demo-race.js",
     "demo:workers": "bash scripts/with-secrets.sh dev node dist/demo-workers.js",
-    "demo:retry": "bash scripts/with-secrets.sh dev node dist/demo-retry.js"
+    "demo:retry": "bash scripts/with-secrets.sh dev node dist/demo-retry.js",
+    "test:integration": "npm run build && jest --config test/jest-integration.config.js",
+    "test:e2e": "npm run build && jest --config test/jest-e2e.config.js",
+    "test:contract": "npm run build && jest --config test/jest-contract.config.js --testPathPatterns=consumer",
+    "verify:provider": "npm run build && jest --config test/jest-contract.config.js --testPathPatterns=provider.verify",
+    "broker:up": "docker compose up -d --wait pact-broker",
+    "broker:down": "docker compose rm -sf pact-broker pact-broker-db"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
@@ -37,10 +43,18 @@
   "devDependencies": {
     "@nestjs/cli": "10.4.9",
     "@nestjs/schematics": "10.2.3",
+    "@nestjs/testing": "^10.4.22",
+    "@pact-foundation/pact": "^17.1.4",
     "@redocly/cli": "2.46.0",
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/express": "4.17.21",
+    "@types/jest": "^30.0.0",
     "@types/node": "22.10.5",
     "@types/pg": "8.11.10",
+    "@types/supertest": "^7.2.1",
+    "jest": "^30.5.2",
+    "supertest": "^7.3.0",
+    "ts-jest": "^29.4.12",
     "typescript": "5.4.5"
   }
 }

@@ -21,6 +21,10 @@
   (відновлення в чистий контейнер + звірка → `MATCH`, результат — у
   [RESTORE-DRILL.md](RESTORE-DRILL.md); див. розділ
   [Пулер зʼєднань і бекапи (hw-15)](#пулер-зʼєднань-і-бекапи-hw-15)).
+- **hw-16** — драбинка довіри над тестами: integration suite на
+  testcontainers (репозиторії TypeORM проти справжнього Postgres), E2E
+  головної фічі через supertest, contract-тест через Pact із брокером і
+  `can-i-deploy` у CI (див. розділ [Тестування (hw-16)](#тестування-hw-16)).
 
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
@@ -535,6 +539,131 @@ bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh   # MATCH або 
 `npm run build && npm run migrate && npm run seed`. Виміряні RTO/RPO — у
 [RESTORE-DRILL.md](RESTORE-DRILL.md).
 
+## Тестування (hw-16)
+
+Драбинка довіри над hw-09/13/14: інтеграційні тести data layer, E2E головної
+фічі через supertest і контракт (Pact), що робить спеку hw-09 виконуваною.
+Усі файли — у `test/`:
+
+| Файл/каталог | Призначення |
+|---|---|
+| `test/testkit/pg-container.ts` | `startPg()` — testcontainers Postgres + `dataSourceOptions` з `src/data-source.ts` (ті самі `dist/migrations/*.js`, що й dev/prod) |
+| `test/testkit/builders.ts` | `aUser()`, `aProduct()`, `anOrder()` — валідні унікальні дефолти |
+| `test/integration/*.repo.test.ts` | репозиторії `Product`/`Order` (TypeORM `Repository<T>`) проти testcontainers |
+| `test/e2e/orders.e2e-spec.ts` | supertest: повний `AppModule`, `POST /orders -> GET /orders/:id` + 2 негативні кейси |
+| `test/contract/consumer.pact.test.ts` | Pact consumer (`marketplace-web`) → `pacts/*.json` |
+| `test/contract/provider.verify.test.ts` | Pact provider verification (локальний файл або брокер — залежно від `PACT_BROKER_URL`) |
+| `jest.config.js` + `test/jest-*.config.js` | спільна база (`reporters: ['default']`) + testMatch на кожен шар |
+| `tsconfig.test.json` | окремий від кореневого `tsconfig.json` — тести НЕ впливають на `npx tsc --noEmit` |
+| `.github/workflows/contract.yml` | CI job `contract`: publish → verify (`publishVerificationResult: true`) → `can-i-deploy` |
+
+### Команди
+
+```bash
+npm run test:integration   # testcontainers: 2 репозиторії × 3+ тестів (unique 23505, FK 23503, JOIN, GROUP BY)
+npm run test:e2e           # supertest: повний Nest-застосунок, happy path + 404 + 400
+npm run test:contract      # Pact consumer -> pacts/marketplace-web-marketplace-api.json
+npm run verify:provider    # Pact provider verification (локальний файл; з PACT_BROKER_URL — з брокера)
+```
+
+Усі чотири самі роблять `npm run build` (потрібні `dist/migrations/*.js`) — окремо
+збирати проєкт перед ними не треба.
+
+### Ізоляція тестів — свідомий вибір
+
+**Контейнер на файл + TRUNCATE між тестами всередині файла.** `beforeAll` у
+кожному тестовому файлі піднімає СВІЙ postgres:16-alpine і накочує міграції
+(`dist/migrations/*.js` — ті самі, що й dev/prod), `beforeEach` робить
+`TRUNCATE ... RESTART IDENTITY CASCADE` (`PgHandle.truncateAll()`). Чому не
+чиста транзакція-ROLLBACK (найдешевша зі стратегій лекції): репозиторій тут
+— `DataSource.getRepository()` з власним пулом з'єднань TypeORM, а не один
+`Client` з відкритим `BEGIN`, який можна підсунути в конструктор (як
+`Queryable` у лекції) — переробляти access-шар заради тестової стратегії
+не хотілося. Чому не один спільний контейнер на весь прогін: два файли
+(`products.repo`, `orders.repo`) виконуються паралельно небезпечно лише
+теоретично (`maxWorkers: 1` в конфізі), але контейнер-на-файл лишає їх
+незалежними навіть якщо хтось підніме `maxWorkers` вище. Повторний
+`npm run test:integration && npm run test:integration` зелений обидва рази
+без ручної чистки — кожен запуск піднімає нові контейнери з нуля.
+
+### Provider verification: локальний файл vs брокер
+
+Один скрипт `verify:provider`, дві гілки в `test/contract/provider.verify.test.ts`
+за наявністю `PACT_BROKER_URL` (`process.env`, не константа в коді):
+
+- без змінної — `pactUrls: [pacts/marketplace-web-marketplace-api.json]` (базовий acceptance-критерій, брокер не потрібен);
+- зі змінною — `pactBrokerUrl` + `publishVerificationResult: true` (той самий виклик, яким користуються CI-джоба `contract` і локальний гейт нижче).
+
+`stateHandlers` тут НЕ сідять БД: ресурси цього API (`products`/`orders`) —
+in-memory (Postgres обслуговує лише
+`/health/db` і ротацію пароля), товар `p1` з інтеракції контракту завжди
+присутній у каталозі — стан-хендлер лишається no-op з поясненням у коді.
+
+### Підняти брокер локально
+
+```bash
+npm run broker:up      # docker compose up -d --wait pact-broker (+ pact-broker-db, порт 9292)
+npm run broker:down    # прибрати обидва контейнери
+```
+
+### Локальний еквівалент CI-гейту (той самий, що в `.github/workflows/contract.yml`)
+
+Спершу «не можна», потім, після верифікації і тега `prod`, — «можна» (`to=prod`
+чесно лишається `unknown`, поки жодну версію провайдера не позначено як
+`prod` — реальний прогін нижче, 23.09.2026):
+
+```bash
+npm run test:contract                    # генерує pacts/marketplace-web-marketplace-api.json
+npm run broker:up                        # брокер на 9292
+
+curl -s -X PUT 'http://127.0.0.1:9292/pacts/provider/marketplace-api/consumer/marketplace-web/version/1.0.0' \
+  -H 'Content-Type: application/json' -d @pacts/marketplace-web-marketplace-api.json -o /dev/null -w '%{http_code}\n'
+# -> 201
+
+curl -s 'http://127.0.0.1:9292/can-i-deploy?pacticipant=marketplace-web&version=1.0.0&to=prod'
+# -> {"deployable":null,"reason":"There is no verified pact between version 1.0.0 of marketplace-web
+#     and the latest version of marketplace-api with tag prod (no such version exists)",
+#     "success":0,"failed":0,"unknown":1}                                    ← верифікації ще немає
+
+PACT_BROKER_URL=http://127.0.0.1:9292 PROVIDER_VERSION=1.0.0 npm run verify:provider   # exit 0, публікує результат
+
+curl -s -X PUT 'http://127.0.0.1:9292/pacticipants/marketplace-api/versions/1.0.0/tags/prod' \
+  -H 'Content-Type: application/json' -o /dev/null -w '%{http_code}\n'
+# -> 201
+
+curl -s 'http://127.0.0.1:9292/can-i-deploy?pacticipant=marketplace-web&version=1.0.0&to=prod'
+# -> {"deployable":true,"reason":"All required verification results are published and successful",
+#     "success":1,"failed":0,"unknown":0}
+
+npm run broker:down
+```
+
+Основний (не аварійний) шлях провайдерської верифікації — через сховище
+секретів hw-11, той самий патерн, що й `migrate`/`seed`:
+
+```bash
+bash scripts/with-secrets.sh dev npm run verify:provider
+```
+
+`with-secrets.sh` інжектить `PACT_BROKER_URL`/`PACT_BROKER_TOKEN` з
+Infisical (оточення `dev`); під `SKIP_VAULT=1` (грейдер) обгортка просто
+виконує ту саму команду, а значення бере з уже виставленого оточення —
+локальний дефолт `http://127.0.0.1:9292` у коді не є секретом (це адреса
+власного compose), тому підходить і без сховища.
+
+### CI: job `contract` (`.github/workflows/contract.yml`)
+
+Піднімає лише `pact-broker` (+ його `pact-broker-db`) із того самого
+`docker-compose.yml` — `db`/`pgbouncer`/`api` тут не потрібні: contract-тести
+піднімають свій Postgres через testcontainers. Кроки: `npm run test:contract`
+→ publish curl'ом → `npm run verify:provider` (`publishVerificationResult: true`,
+`providerVersion: github.sha`) → `can-i-deploy`, що валить джобу, якщо
+`deployable !== true`. `PACT_BROKER_TOKEN` — з GitHub secrets (для власного
+compose-брокера без автентифікації не обов'язковий, але код і CI вміють його
+передати). Як і в лекції, до першого тега `prod` на версії провайдера ця
+джоба чесно провалиться на `can-i-deploy` — це не баг конфігурації, а сенс
+гейту (див. вище).
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -604,6 +733,51 @@ grep -iE 'RTO|RPO' RESTORE-DRILL.md
 статичний критерій (обгортка зашита в `migrate`/`seed` у `package.json`,
 у `src/data-source.ts` немає зашитого пароля) перевіряє це без сховища й
 без бази.
+
+### hw-16 (integration/E2E/contract testing)
+
+Без сховища, `SKIP_VAULT=1` не потрібен — жоден із чотирьох npm-скриптів не
+ходить через `with-secrets.sh` (testcontainers піднімає власний Postgres,
+пароль до якого живе секунди — деталі в розділі
+[Тестування (hw-16)](#тестування-hw-16)). Потрібен лише запущений Docker.
+
+```bash
+npm ci
+npx tsc --noEmit
+
+npm run test:integration          # exit 0, Tests: N passed (N>=6), PASS-рядки видно
+grep -rn "PostgreSqlContainer" test/ src/
+grep -rniE "duplicate key|unique|2350[0-9]|foreign key|constraint" test/ src/
+grep -n "reporters" jest.config.*
+
+npm run test:integration && npm run test:integration   # обидва прогони зелені без ручної чистки
+
+npm run test:e2e                  # exit 0, Tests: N passed (N>=2)
+grep -rnE "\b(400|404|409|422)\b|HttpStatus\.(BAD_REQUEST|NOT_FOUND|CONFLICT|UNPROCESSABLE_ENTITY)" test/e2e/
+
+npm run test:contract             # exit 0, генерує pacts/*.json
+ls pacts/*.json
+grep providerStates pacts/*.json
+
+npm run verify:provider           # exit 0 — справжній застосунок проти контракту
+npm run verify:provider 2>&1 | sed -E $'s/\x1b\\[[0-9;]*m//g' | grep -F "has a matching body (OK)"
+# рівноцінно без sed: npm run verify:provider 2>&1 | grep -F '"result":"OK"'
+
+# контракт узгоджений зі спекою #9 (заміни <файл> на своє імʼя пакта, якщо інше)
+node -e 'const p=require("./pacts/marketplace-web-marketplace-api.json");const spec=require("fs").readFileSync("openapi/openapi.yaml","utf8");const sp=[...spec.matchAll(/^\s+(\/\S*):\s*$/gm)].map(m=>m[1]);const seg=s=>s.split("?")[0].replace(/\/+$/,"").split("/");const fit=(a,b)=>{a=seg(a);b=seg(b);return a.length===b.length&&a.every((x,i)=>/^\{[^}]+\}$/.test(x)?b[i]!=="":x===b[i])};const bad=p.interactions.filter(i=>!sp.some(x=>fit(x,i.request.path)));console.log(bad.length?"НЕМАЄ У СПЕЦІ: "+bad.map(i=>i.request.path).join(", "):"OK");process.exit(bad.length?1:0)'
+
+grep -rn "can-i-deploy" .github/workflows/
+python3 -c "import yaml;yaml.safe_load(open('.github/workflows/contract.yml'))"
+
+test -f scripts/with-secrets.sh && grep -q 'SKIP_VAULT' scripts/with-secrets.sh
+grep -rnE "PACT_BROKER_TOKEN[[:space:]]*[:=][[:space:]]*['\"][^'\"$]" --include='*.ts' --include='*.js' --include='*.yml' --include='*.yaml' --include='*.json' . | grep -v node_modules
+# (порожній вивід — OK)
+```
+
+Локальний еквівалент гейту can-i-deploy (unknown -> true) — повна
+послідовність команд і реальні виводи з 23.09.2026 у розділі
+[Тестування (hw-16) → Локальний еквівалент CI-гейту](#тестування-hw-16)
+вище.
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
