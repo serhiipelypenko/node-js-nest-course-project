@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { INestApplication } from '@nestjs/common';
 import { Verifier, VerifierOptions } from '@pact-foundation/pact';
-import { createApp } from '../../src/main';
 import { startPg, PgHandle } from '../testkit/pg-container';
 
 const PROVIDER_PORT = 3701;
@@ -41,6 +40,13 @@ describe('Pact provider verification · marketplace-api проти контра�
     process.env.DB_URL = pg.dbUrlWithoutPassword;
     process.env.DB_PASSWORD_FILE = pg.passwordFile;
 
+    // require, а НЕ import: ConfigModule.forRoot({ validate }) у
+    // src/app.module.ts валідує process.env синхронно в момент першого
+    // require() цього модуля (а не пізніше, коли Nest будує DI-граф) — тож
+    // якщо взяти createApp() статичним import'ом на верху файлу, він
+    // виконається ДО setPg()/присвоєння DB_URL вище і впаде з "DB_URL:
+    // Required" (саме так і падало у CI, де немає .env з дефолтним DB_URL).
+    const { createApp } = require('../../src/main');
     app = await createApp();
     await app.listen(PROVIDER_PORT);
   }, 60_000);

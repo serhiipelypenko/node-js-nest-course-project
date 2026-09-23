@@ -5,8 +5,6 @@ import { Test } from '@nestjs/testing';
 // supertest експортує через `export =`, тому `import request from` дав би
 // runtime-помилку (request_1.default is not a function).
 import request = require('supertest');
-import { AppModule } from '../../src/app.module';
-import { configureApp, APP_OPTIONS } from '../../src/main';
 import { startPg, PgHandle } from '../testkit/pg-container';
 
 /**
@@ -34,6 +32,13 @@ describe('E2E · POST /orders -> GET /orders/:id (supertest)', () => {
     process.env.DB_URL = pg.dbUrlWithoutPassword;
     process.env.DB_PASSWORD_FILE = pg.passwordFile;
 
+    // require, а НЕ import: ConfigModule.forRoot({ validate }) у
+    // src/app.module.ts валідує process.env синхронно в момент першого
+    // require() цього модуля — тож AppModule/main.ts мають бути required
+    // ПІСЛЯ setPg()/присвоєння DB_URL вище, інакше падає з "DB_URL:
+    // Required" ще на статичному import'і (так падало у CI без .env).
+    const { AppModule } = require('../../src/app.module');
+    const { configureApp, APP_OPTIONS } = require('../../src/main');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = configureApp(moduleRef.createNestApplication(APP_OPTIONS));
     await app.init();
