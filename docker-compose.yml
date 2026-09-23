@@ -18,21 +18,41 @@ services:
       timeout: 3s
       retries: 10
 
+  # hw-15: пулер зʼєднань на боці БД. Застосунок і CLI ходять у базу через нього.
+  # Порт 6432 опублікований — SHOW POOLS / psql з хоста: psql -h 127.0.0.1 -p 6432.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # pg_isready не логіниться — не залежить від пароля ролі, який ротується
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
     image: marketplace-api:latest
     depends_on:
-      db:
+      pgbouncer:
         condition: service_healthy
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
-      # у мережі compose хост БД — імʼя сервісу `db`; пароля в DSN немає
-      DB_URL: postgres://marketplace@db:5432/marketplace
+      # hw-15: у мережі compose застосунок ходить у БД через PgBouncer
+      # (сервіс `pgbouncer`, порт 6432), а не напряму в `db`; пароля в DSN немає
+      DB_URL: postgres://marketplace@pgbouncer:6432/marketplace
       DB_PASSWORD_FILE: /run/secrets/db_password
     volumes:
       # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає

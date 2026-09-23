@@ -16,6 +16,11 @@
   транзакції, без oversell при 50+ паралельних викликах), воркер-пул через
   `FOR UPDATE SKIP LOCKED` і retry-патерн на `40001`/`40P01` під
   REPEATABLE READ (див. розділ [Конкурентність (hw-14)](#конкурентність-hw-14)).
+- **hw-15** — PgBouncer (transaction mode) перед Postgres, `scripts/backup.sh`
+  (`pg_dump -Fc` з датою в імені + `backup.cron`) і `scripts/restore-drill.sh`
+  (відновлення в чистий контейнер + звірка → `MATCH`, результат — у
+  [RESTORE-DRILL.md](RESTORE-DRILL.md); див. розділ
+  [Пулер зʼєднань і бекапи (hw-15)](#пулер-зʼєднань-і-бекапи-hw-15)).
 
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
@@ -91,7 +96,7 @@ npm start                                         # = npm run build && node dist
 | `DB_PASSWORD_FILE` | шлях до файла                        | ні          | `./secrets/db_password`   | `.env` / оточення процесу (сам пароль — у файлі-секреті, не в git) | файл із паролем ролі БД |
 
 `DB_URL` — це та сама змінна з hw-11; для hw-12 змінилося лише **значення**:
-воно вказує на базу цього ДЗ. Нового env-файла з рядком підключення не
+воно вказує на базу цього ДЗ. З hw-15 хост/порт у ній — PgBouncer (`6432`), а не прямий Postgres. Нового env-файла з рядком підключення не
 зʼявилося — джерело правди для `dev`/`prod` — сховище конфігурації, а
 `.env.example` містить лише зразок із фейковим паролем.
 
@@ -447,6 +452,89 @@ read-modify-write в застосунку (SELECT -> думаємо -> UPDATE) �
 read-modify-write сценарій (баланс без атомарного UPDATE, під REPEATABLE
 READ), щоб чесно показати, де retry-патерн потрібен насправді.
 
+## Пулер зʼєднань і бекапи (hw-15)
+
+```
+pgbouncer/pgbouncer.ini   — конфіг PgBouncer: pool_mode=transaction, default_pool_size=10,
+                            max_client_conn=200, адмін-консоль (admin_users)
+pgbouncer/userlist.txt    — лише службова роль pgbouncer_auth (dev-фейк-пароль)
+scripts/init.sql          — + роль pgbouncer_auth і функція pgbouncer.get_auth (auth_query)
+scripts/backup.sh         — pg_dump -Fc -> backups/<db>-<дата>_<час>.dump
+scripts/restore-drill.sh  — останній дамп -> чистий контейнер -> звірка -> MATCH / MISMATCH
+scripts/lib-conn.sh       — спільне: DATABASE_URL (або DB_*) -> роль і імʼя бази
+backup.cron               — щоночі о 03:00
+RESTORE-DRILL.md          — протокол drill-у: дата, розмір, час, RTO, RPO
+```
+
+### PgBouncer
+
+`docker compose up -d --wait` піднімає `db`, `pgbouncer` (порт **6432**, опублікований
+на хост) і `api`. Застосунок ходить у базу через PgBouncer: у compose
+`DB_URL=postgres://marketplace@pgbouncer:6432/marketplace`, а рядок-контракт у
+`.env.example` вказує на `localhost:6432`. Прямий порт Postgres (5432) лишився
+опублікованим лише для `psql -f /db/schema.sql` (hw-12) і `pg_dump`. Нового секрета
+немає: змінилося лише **значення** `DB_URL` (сховище hw-11, оточення dev і prod); пароль
+ролі `marketplace` і далі береться з файла `DB_PASSWORD_FILE`.
+
+```bash
+# запит через пулер
+PGPASSWORD=dev_secret_pw psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+# адмін-консоль: база marketplace, pool_mode = transaction
+PGPASSWORD=pgbouncer_auth_dev_pw psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth -d pgbouncer -c "SHOW POOLS"
+```
+
+**Автентифікація через `auth_query`, а не `userlist.txt` з паролем ролі.** `rotate.sh`
+(hw-11) міняє пароль `marketplace` у БД; статичний файл із паролем на боці PgBouncer
+одразу застарів би, і ротація «без рестарту» зламалась би саме тут. Тому PgBouncer
+логіниться службовою роллю `pgbouncer_auth` (її пароль не ротується) і щоразу питає
+SCRAM-хеш клієнта функцією `pgbouncer.get_auth` — ротація проходить без правок конфігу
+й без рестарту PgBouncer (перевірено: після `rotate.sh` новий пароль пускає, старий — ні).
+
+**Чому transaction mode і що він ламає.** У transaction mode серверне зʼєднання
+видається клієнту лише на час транзакції, тож 200 клієнтів ділять між собою 10
+backend-ів Postgres, а не тримають по процесу кожен — саме це дає масштаб, коли
+подів багато, а `max_connections` в бази обмежений. Ціна: усе, що живе довше за
+транзакцію, більше не гарантоване. Ламаються (1) `SET` / `SET search_path` поза
+транзакцією — наступний запит може потрапити на інший backend, де налаштування нема
+(`SET LOCAL` усередині транзакції безпечний); (2) `LISTEN/NOTIFY` — підписка живе на
+конкретному backend-і, а зʼєднання вже повернулось у пул; (3) advisory locks рівня
+сесії (`pg_advisory_lock`) — лок належить backend-у і «губиться» разом із поверненням
+у пул (лише `pg_advisory_xact_lock`); (4) іменовані prepared statements — вони
+привʼязані до backend-а (у нас `max_prepared_statements = 0`); (5) `WITH HOLD`-курсори
+й тимчасові таблиці на сесію. Транзакційні патерни hw-14 (checkout, `SKIP LOCKED`,
+retry на 40001) працюють через PgBouncer без змін — усе відбувається всередині однієї
+транзакції, перевірено `demo:race` / `demo:workers` / `demo:retry` на порту 6432.
+
+### Бекап
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/backup.sh
+# backup: 29 обʼєктів у TOC, 13M
+# ./backups/marketplace-2026-09-20_214605.dump
+```
+
+`pg_dump -Fc` виконується в контейнері `db` через unix-сокет (`docker compose exec`),
+**у обхід PgBouncer**: бекап — довга транзакція зі знімком, пулер тут нічого не дає.
+Файл пишеться в `backups/` на хості (поза контейнером, у `.gitignore`/`.dockerignore`)
+спершу як `.partial` і перейменовується лише після успіху та перевірки TOC
+(`pg_restore --list`); старші за `BACKUP_KEEP_DAYS` (14) дампи видаляються.
+`backup.cron` запускає скрипт щоночі о 03:00 (`crontab backup.cron`).
+
+### Restore-drill
+
+```bash
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh   # MATCH або exit 1
+```
+
+Скрипт бере останній дамп, знімає з живої бази кількість рядків усіх таблиць і
+`count/sum(total_amount)` по `orders`, піднімає **чистий** контейнер
+(`docker run` того самого образу; анонімний том — новий і порожній), відновлює дамп і
+порівнює ті самі значення. Контейнер і том скрипт сам прибирає (`trap EXIT`), тож
+повторний запуск теж стартує з порожнього. Порожня база не є помилкою (свіжий клон),
+але скрипт попереджає, що звірка нічого не доводить — спершу
+`npm run build && npm run migrate && npm run seed`. Виміряні RTO/RPO — у
+[RESTORE-DRILL.md](RESTORE-DRILL.md).
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -479,6 +567,36 @@ npm run report
 npm run demo:race
 npm run demo:workers
 npm run demo:retry
+```
+
+### hw-15 (PgBouncer + backup + restore-drill)
+
+Ті самі правила: без сховища, `SKIP_VAULT=1`, дев-креденшели з `docker-compose.yml`.
+Скрипти беруть підключення з `$DATABASE_URL` (обгортка `with-secrets.sh` при
+`SKIP_VAULT=1` просто виконує команду; без обгортки скрипти теж працюють, якщо
+`DATABASE_URL` уже в оточенні). З URL використовуються лише роль і імʼя бази — сам
+`pg_dump` іде в контейнер `db` (docker має бути доступний).
+
+```bash
+docker compose up -d --wait
+
+# застосунок ходить через PgBouncer — порт 6432
+PGPASSWORD=dev_secret_pw psql -h 127.0.0.1 -p 6432 -U marketplace -d marketplace -c "SELECT 1"
+PGPASSWORD=pgbouncer_auth_dev_pw psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth -d pgbouncer -c "SHOW POOLS"
+grep -E '^\s*pool_mode\s*=\s*transaction' pgbouncer/pgbouncer.ini
+grep -E '^(export[[:space:]]+)?(DATABASE_URL|DB_URL)=' .env.example
+
+# наповнити БД, щоб drill мав що звіряти (для порожньої бази MATCH формальний)
+export DB_HOST=127.0.0.1 DB_PORT=6432 DB_USER=marketplace DB_PASSWORD=dev_secret_pw DB_NAME=marketplace
+export SKIP_VAULT=1
+npm ci && npm run build && npm run migrate && npm run seed
+
+export DATABASE_URL=postgres://marketplace:dev_secret_pw@127.0.0.1:6432/marketplace
+bash scripts/with-secrets.sh dev bash scripts/backup.sh          # друкує backups/marketplace-<дата>.dump
+pg_restore --list backups/marketplace-*.dump | head              # (потрібен pg_restore на хості)
+bash scripts/with-secrets.sh dev bash scripts/restore-drill.sh   # друкує MATCH
+grep -cE '^(@(reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)|([0-9*/,-]+[[:space:]]+){4}[0-9*/,-]+)[[:space:]]+.*backup' backup.cron
+grep -iE 'RTO|RPO' RESTORE-DRILL.md
 ```
 
 Основний шлях (без `SKIP_VAULT`) усе одно веде у сховище —

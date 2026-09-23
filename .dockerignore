@@ -15,6 +15,7 @@ spec.json
 .DS_Store
 README.md
 secrets/task.md
+backups/
 CLAUDE.md
 rotate.sh
 docker-compose.yml
