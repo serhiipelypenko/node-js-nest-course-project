@@ -123,6 +123,38 @@ paths:
                 $ref: '#/components/schemas/Order'
         '404':
           $ref: '#/components/responses/NotFound'
+  /orders/{id}/status:
+    patch:
+      operationId: updateOrderStatus
+      summary: Змінити статус замовлення
+      description: >
+        Ставить замовленню новий статус і емітить подію order.status у
+        realtime-шар (ДЗ №8/hw-18) — WebSocket-кімнату orders/{id} і
+        SSE-потік GET /orders/{id}/events.
+      tags: [orders]
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderStatusRequest'
+      responses:
+        '200':
+          description: Статус оновлено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  # GET /orders/{id}/events (SSE, hw-18) свідомо НЕ в цій спеці: тіло —
+  # нескінченний text/event-stream, а не JSON, звірити зі схемою нічого;
+  # ignoreUndocumented: true в src/main.ts пропускає його так само, як
+  # /health, /health/db.
 components:
   parameters:
     Limit:
@@ -200,11 +232,18 @@ components:
           example: 2
     Order:
       type: object
-      required: [id, items, total_cents, status, created_at]
+      required: [id, buyer_id, items, total_cents, status, created_at]
       properties:
         id:
           type: string
           example: o1
+        buyer_id:
+          type: string
+          description: >
+            Власник замовлення. Використовує WS-gateway (hw-18) для
+            перевірки на join у кімнату orders/{id} — анонімному або
+            чужому клієнту відмовляє.
+          example: u1
         items:
           type: array
           minItems: 1
@@ -216,7 +255,7 @@ components:
           example: 129900
         status:
           type: string
-          enum: [new]
+          enum: [new, packed, shipped, delivered, cancelled]
           example: new
         created_at:
           type: string
@@ -244,6 +283,20 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/OrderItem'
+        buyer_id:
+          type: string
+          description: >
+            Власник замовлення. Необовʼязковий — якщо не переданий,
+            замовлення належить гостю ('guest'), як і до hw-18.
+          example: u1
+    UpdateOrderStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [new, packed, shipped, delivered, cancelled]
+          example: packed
     Problem:
       type: object
       description: RFC 9457 problem+json — єдина форма помилки для всіх 4xx.
