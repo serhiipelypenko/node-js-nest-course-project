@@ -25,6 +25,11 @@
   testcontainers (репозиторії TypeORM проти справжнього Postgres), E2E
   головної фічі через supertest, contract-тест через Pact із брокером і
   `can-i-deploy` у CI (див. розділ [Тестування (hw-16)](#тестування-hw-16)).
+- **hw-18** — realtime-шар: WebSocket-gateway (socket.io, кімнати `orders:<id>`
+  з перевіркою власності) і SSE (`GET /orders/{id}/events`, `Last-Event-ID`)
+  над спільною шиною подій, headless-демо ізоляції кімнат
+  (`scripts/realtime-demo.mjs`) (див. розділ
+  [Realtime-шар (hw-18)](#realtime-шар-hw-18)).
 
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
@@ -39,8 +44,9 @@ express-обробником помилок валідатора — детал�
 ## Структура
 
 ```
-openapi/openapi.yaml    — контракт: 2 ресурси (products, orders), 5 операцій
+openapi/openapi.yaml    — контракт: 2 ресурси (products, orders), 6 операцій
 scripts/check-spec.cjs  — перевірка обсягу спеки (операції/ресурси/Idempotency-Key)
+scripts/realtime-demo.mjs — headless-демо ізоляції WS-кімнат (hw-18)
 src/
   main.ts                     — bootstrap: підключення express-openapi-validator
                                  як express-мідлвара (validateRequests + validateResponses)
@@ -51,7 +57,12 @@ src/
     problem-json.middleware.ts  — express error-handler: помилки самого валідатора
     cursor.ts                   — opaque-курсор (base64url від offset)
   products/                   — GET /products, GET /products/{id}
-  orders/                     — GET /orders, GET /orders/{id}, POST /orders
+  orders/                     — GET /orders, GET /orders/{id}, POST /orders,
+                                 PATCH /orders/{id}/status, GET /orders/{id}/events (SSE)
+    order-events.service.ts     — спільна шина подій (RxJS Subject) + буфер
+                                   останніх подій на замовлення (hw-18)
+    orders.gateway.ts            — WebSocket-gateway: join, кімната orders:<id>,
+                                   перевірка власника замовлення (hw-18)
 ```
 
 Дані — in-memory (масиви в сервісах), без БД.
@@ -668,6 +679,76 @@ compose-брокера без автентифікації не обов'язк�
 джоба чесно провалиться на `can-i-deploy` — це не баг конфігурації, а сенс
 гейту (див. вище).
 
+## Realtime-шар (hw-18)
+
+Покупець дізнавався про зміну статусу замовлення лише при перезавантаженні
+сторінки. hw-18 додає realtime-нотифікацію «статус замовлення змінився»
+двома транспортами над однією шиною подій — щоб на власному коді відчути
+trade-offs WebSocket проти SSE.
+
+**Спільна шина** — `src/orders/order-events.service.ts`: RxJS `Subject`
+(гарячий, мультикастить усім підписникам одразу) + буфер останніх 100 подій
+**на кожне замовлення окремо** (для догравання пропущеного SSE-клієнту).
+Бізнес-логіка зміни статусу (`OrdersService.updateStatus`) — єдине місце,
+звідки йде `emitStatusChange`; і WS-gateway, і SSE-контролер лише
+підписуються на `events$`, самі нічого не міняють.
+
+**WebSocket** — `src/orders/orders.gateway.ts` (`@WebSocketGateway()`,
+socket.io). Ідентичність покупця (`buyerId`) курсовий бере з
+handshake-`auth` при підключенні (`io(url, { auth: { buyerId } })`) —
+справжньої авторизації у проєкті ще немає (`openapi.yaml`: `security: []`,
+майбутнє ДЗ), тому це свідомо проста заглушка, а не крипто-перевірка.
+Клієнт шле `join` з id замовлення; gateway кладе сокет у кімнату
+`orders:<id>` лише якщо замовлення існує і `buyerId` збігається з його
+`buyer_id` — анонімному (без `buyerId`) чи чужому клієнту відповідає
+`{ok:false, reason:'not-found'|'forbidden'}` і в кімнату не пускає. Коли
+`updateStatus` спрацьовує, gateway емітить `order.status` лише в кімнату
+цього замовлення (`server.to(...)`), а не всім підключеним.
+
+**SSE** — `GET /orders/{id}/events` у `src/orders/orders.controller.ts`,
+`content-type: text/event-stream`. Кожна подія — `id:`/`event:`/`data:`, той
+самий формат, що в лекційному кроці 3. Реконект із заголовком
+`Last-Event-ID: N` доганяє з буфера події з `id > N` цього замовлення, потім
+переходить у живий потік. Маршрут навмисно НЕ в `openapi/openapi.yaml` — як
+`/health`/`/health/db`, він проходить повз express-openapi-validator через
+`ignoreUndocumented: true` (нескінченний стрім не звірити зі схемою JSON).
+
+### Headless-демо ізоляції кімнат
+
+```bash
+node scripts/realtime-demo.mjs               # основний: різні кімнати — B не чує подію A
+node scripts/realtime-demo.mjs --same-room   # контрольний: обидва в кімнаті A — B МУСИТЬ почути
+```
+
+Скрипт створює два замовлення (кожне зі своїм `buyer_id`), підключає два
+socket.io-клієнти, чекає ack `joined` від обох, і лише ПОТІМ міняє статус
+замовлення A через `PATCH /orders/{id}/status`. У контрольному режимі другий
+клієнт заходить у кімнату замовлення A під тим самим `buyerId`, що й перший
+(інакше перевірка власності відхилила б його join, і вимірювався б відмова в
+доступі, а не ізоляція кімнат) — міняється лише кімната, не логіка перевірки.
+
+### Trade-offs: WebSocket vs SSE
+
+| Критерій | WebSocket | SSE |
+|---|---|---|
+| Напрям каналу | двосторонній (клієнт теж шле) | лише сервер → клієнт |
+| Реконект/відновлення | руками (або з коробки в socket.io: авто-реконект + `connectionStateRecovery`) | вбудовано в `EventSource` — сам реконектиться і сам шле `Last-Event-ID` |
+| Вимоги до інфраструктури | окремий протокол після `Upgrade`; проксі/CDN/деякі balancer'и іноді ріжуть `Upgrade` або обривають ідле-з'єднання | звичайний HTTP-стрім — працює скрізь, де працює HTTP, включно з HTTP/2 |
+| Ціна на подію | фрейм (від ~2 байтів заголовка) після рукостискання | кілька байтів (`id:`/`event:`/`data:`) у вже відкритий потік |
+| Масштабування на N інстансів | кімнати живуть у пам'яті процесу — без Redis-адаптера сокет на іншому інстансі нотифікацію не побачить | той самий буфер-у-пам'яті обмежений одним процесом; N інстансів так само потребують спільного стану (Redis pub/sub, черга) |
+
+Для нотифікацій про статус замовлення я лишив би **SSE**: канал і так
+однонаправлений (сервер → клієнт), а безкоштовний авто-реконект з
+`Last-Event-ID` у браузерному `EventSource` знімає рівно ту роботу
+(«що я пропустив, поки був відключений»), яку тут довелося писати руками для
+WebSocket. WS має сенс лише якщо з'явиться зворотний канал від покупця
+(чат підтримки, редагування замовлення в реальному часі).
+
+Для одного інстанса (як зараз) Redis-адаптер не потрібен — але при двох
+інстансах кімнати `orders:<id>` живуть у пам'яті КОЖНОГО процеса окремо, тож
+`server.to(room).emit(...)` на інстансі А не долетить до сокета, підключеного
+до інстансу Б; лікується `@socket.io/redis-adapter`.
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -782,6 +863,57 @@ grep -rnE "PACT_BROKER_TOKEN[[:space:]]*[:=][[:space:]]*['\"][^'\"$]" --include=
 послідовність команд і реальні виводи з 23.09.2026 у розділі
 [Тестування (hw-16) → Локальний еквівалент CI-гейту](#тестування-hw-16)
 вище.
+
+### hw-18 (realtime: WebSocket + SSE)
+
+Без сховища — `SKIP_VAULT=1` не потрібен, realtime-шар БД не чіпає взагалі
+(products/orders курсового HTTP-шару — in-memory). Потрібен лише піднятий
+застосунок (`o1` — замовлення з seed-даних, є завжди):
+
+```bash
+npm ci
+npm run build
+npm start &
+sleep 2   # дати застосунку піднятись
+
+# SSE-заголовок
+curl -sN --max-time 2 -D - -o /dev/null http://localhost:3000/orders/o1/events | grep -i '^content-type'
+# text/event-stream
+
+# Формат подій: паралельно міняємо статус і одразу читаємо потік
+( sleep 0.3; curl -s -X PATCH http://localhost:3000/orders/o1/status \
+    -H 'content-type: application/json' -d '{"status":"packed"}' >/dev/null ) &
+curl -sN --max-time 3 http://localhost:3000/orders/o1/events
+# id: 1
+# event: order.status
+# data: {"id":1,"orderId":"o1","status":"packed","ts":"..."}
+
+# Last-Event-ID: щонайменше 4 зміни статусу (id 1..N, N>=4), тоді
+for s in shipped delivered new packed; do
+  curl -s -X PATCH http://localhost:3000/orders/o1/status \
+    -H 'content-type: application/json' -d "{\"status\":\"$s\"}" >/dev/null
+done
+curl -sN --max-time 2 -H 'Last-Event-ID: 3' http://localhost:3000/orders/o1/events | grep '^id:' | head -1
+# id > 3 (пропущене доїхало, дублів нема)
+
+# Ізоляція кімнат — основний і контрольний прогони
+node scripts/realtime-demo.mjs;             echo "exit=$?"
+# A_RECEIVED=1 · B_RECEIVED=0 · exit=0
+node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
+# A_RECEIVED=1 · B_RECEIVED=1 · exit=0
+
+kill %1   # зупинити застосунок, піднятий вище через `npm start &`
+```
+
+Trade-offs (таблиця + висновок) — розділ
+[Realtime-шар (hw-18) → Trade-offs: WebSocket vs SSE](#realtime-шар-hw-18)
+вище; перевірка, що це саме таблиця:
+
+```bash
+sec=$(awk 'tolower($0) ~ /^#+ .*trade[ -]?off/{f=1;next} f && /^#+ /{exit} f' README.md)
+printf '%s\n' "$sec" | grep -cE '^ *\|? *:?-{3,}'   # >= 1 — рядок-роздільник таблиці
+printf '%s\n' "$sec" | grep -c '|'                   # >= 4 — шапка + роздільник + мінімум 2 рядки
+```
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
