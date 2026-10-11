@@ -58,6 +58,29 @@ services:
       # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає
       - ./secrets/db_password:/run/secrets/db_password:ro
 
+  # hw-19: брокер повідомлень. -management — щоб x-death і політики було видно
+  # очима (UI :15672) і щоб мати HTTP API. AMQP — порт 5672 (саме його і
+  # треба в BROKER_URL; на 15672 відповідає вебморда, а не AMQP).
+  # consumer_timeout лишено стоковим (30 хв): обґрунтування prefetch у README.
+  rabbitmq:
+    image: rabbitmq:4.3.4-management-alpine
+    hostname: marketplace-rabbit
+    environment:
+      # dev-креденшели, навмисно в git — як `marketplace` у db (свіжий клон
+      # має підніматись однією командою)
+      RABBITMQ_DEFAULT_USER: app
+      RABBITMQ_DEFAULT_PASS: app
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      # чесна готовність Erlang-ноди, а не «TCP-порт відкрився»
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
   # hw-16: Pact Broker — контракт живе тут, а не в pacts/*.json консюмера;
   # can-i-deploy питає саме цей сервіс. Власна маленька база, ІЗОЛЬОВАНА від
   # `db` застосунку: брокер не має жодного стосунку до домену Marketplace.
