@@ -17,6 +17,13 @@
 // дві конкурентні транзакції-чекаути ніколи не можуть чекати одна на одну
 // в протилежному порядку (передумова deadlock 40P01, лекція 14 крок 5).
 import { DataSource } from 'typeorm';
+import { buildOrderPlaced, OrderPlacedEvent } from './messaging/events';
+
+// hw-19: продюсер події — залежність-інтерфейс, а не клієнт брокера: checkout
+// не знає ні про RabbitMQ, ні про те, хто слухає order.placed.
+export interface OrderPlacedPublisher {
+  publishOrderPlaced(event: OrderPlacedEvent): Promise<void>;
+}
 
 //  TypeORM/pg: для
 // UPDATE ... RETURNING queryRunner.query() повертає tuple [rows, rowCount],
@@ -43,6 +50,9 @@ export interface CheckoutSuccess {
   ok: true;
   orderId: string;
   totalAmount: number;
+  // hw-19: true, якщо order.placed підтверджено брокером (confirm). false —
+  // publisher не передано або публікація впала ПІСЛЯ COMMIT (див. коментар нижче).
+  eventPublished: boolean;
 }
 
 export interface CheckoutFailure {
@@ -55,6 +65,7 @@ export type CheckoutResult = CheckoutSuccess | CheckoutFailure;
 export async function checkout(
   dataSource: DataSource,
   { buyerId, productId, quantity }: CheckoutParams,
+  publisher?: OrderPlacedPublisher,
 ): Promise<CheckoutResult> {
   const qr = dataSource.createQueryRunner();
   await qr.connect();
@@ -120,7 +131,29 @@ export async function checkout(
     );
 
     await qr.commitTransaction();
-    return { ok: true, orderId, totalAmount };
+
+    // hw-19: подія — ПІСЛЯ COMMIT: брокер не може побачити замовлення, якого
+    // немає. Ціна: dual write. Падіння між COMMIT і confirm = замовлення є, події
+    // немає. Спільного COMMIT бази й брокера не існує; закриває це transactional
+    // outbox (ДЗ #22), тут цю межу лише називаємо.
+    let eventPublished = false;
+    if (publisher) {
+      try {
+        await publisher.publishOrderPlaced(
+          buildOrderPlaced({
+            orderId,
+            buyerId,
+            productId,
+            quantity,
+            totalAmount,
+          }),
+        );
+        eventPublished = true;
+      } catch (e) {
+        console.error(`order.placed для замовлення ${orderId} не опубліковано:`, e);
+      }
+    }
+    return { ok: true, orderId, totalAmount, eventPublished };
   } catch (e) {
     await qr.rollbackTransaction().catch(() => undefined);
     throw e;

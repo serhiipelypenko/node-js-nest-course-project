@@ -30,6 +30,11 @@
   над спільною шиною подій, headless-демо ізоляції кімнат
   (`scripts/realtime-demo.mjs`) (див. розділ
   [Realtime-шар (hw-18)](#realtime-шар-hw-18)).
+- **hw-19** — async-події через RabbitMQ: `order.placed` із транзакційного
+  `checkout()` (confirm-канал), споживач із ручним ack і явним prefetch, DLQ як
+  окремий контур, ідемпотентний ефект у Postgres (`ON CONFLICT DO NOTHING`);
+  три демо `demo:publish` / `demo:dlq` / `demo:duplicate` (див. розділ
+  [Async-події через RabbitMQ](#async-події-через-rabbitmq)).
 
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
@@ -749,6 +754,100 @@ WebSocket. WS має сенс лише якщо з'явиться зворотн
 `server.to(room).emit(...)` на інстансі А не долетить до сокета, підключеного
 до інстансу Б; лікується `@socket.io/redis-adapter`.
 
+## Async-події через RabbitMQ
+
+Між `checkout()` (hw-14) і тими, хто реагує на замовлення, стоїть брокер, який
+зберігає повідомлення, доки не зʼявиться одержувач (WebSocket із hw-18 доставляв
+лише тому, хто підключений зараз). Код — `src/messaging/`, брокер —
+`rabbitmq:4.3.4-management-alpine` у `docker-compose.yml` (AMQP — `5672`,
+вебморда — `15672`, dev-креденшели `app:app`).
+
+| Файл | Призначення |
+|------|-------------|
+| `src/messaging/topology.ts` | `assertTopology` — exchange, черга, binding, DLX + DLQ, alternate exchange; викликає споживач/бутстрап, **не** продюсер |
+| `src/messaging/events.ts` | контракт `order.placed` (`eventId`, `type`, `occurredAt`, `data`) + стабільний `eventId` |
+| `src/messaging/publisher.ts` | публікація через `createConfirmChannel` + `waitForConfirms`, `mandatory: true` |
+| `src/messaging/consumer.ts` | `noAck: false`, ack після ефекту, `prefetch`, ідемпотентний INSERT |
+| `src/messaging/consumer-process.ts` | той самий споживач окремим процесом (для `kill -9` у `demo:duplicate`) |
+| `src/checkout.ts` | публікує `order.placed` **після COMMIT** (необовʼязковий `publisher`) |
+| `src/demo-publish.ts` / `demo-dlq.ts` / `demo-duplicate.ts` | три демо з контрактом `ключ=значення` |
+| `src/migrations/…-OrderReceipts.ts` | таблиця ефекту `order_receipts (event_id PRIMARY KEY, …)` |
+
+### Топологія
+
+```
+checkout() ──order.placed──▶ [shop.events : topic] ──binding order.placed──▶ (shop.order-placed : quorum)
+                                  │ alternate-exchange                          │ x-dead-letter-exchange
+                                  ▼                                             ▼
+                        [shop.unroutable : fanout] ▶ (shop.unroutable)   [shop.dlx] ▶ (shop.order-placed.dlq)
+```
+
+- Черги — `quorum` (працює `x-delivery-limit`; для `order.placed` ліміт = 5).
+- DLX на робочій черзі — **аргументом** при оголошенні (`x-dead-letter-exchange`,
+  `x-dead-letter-routing-key`). Аргументи черги незмінні: змінити їх на існуючій
+  черзі = `406 PRECONDITION_FAILED`, тож зміна означає `delete` + створення
+  (політика цього б не потребувала).
+- Routing key без binding не зникає мовчки: **alternate exchange** `shop.unroutable`
+  ловить такі повідомлення (брокер при цьому віддає продюсеру позитивний confirm —
+  без AE ми б цього не побачили). `demo:publish` показує це рядком `unroutable=1`.
+- `dead-letter-strategy` лишено дефолтною (`at-most-once`): `at-least-once`
+  вимагає `overflow: reject-publish`, інакше брокер мовчки відкотиться на
+  `at-most-once` і скаже про це лише в лозі. Для ДЗ дефолт достатній.
+
+### prefetch = 10
+
+`prefetch × час обробки < consumer_timeout`: обробка однієї події — один INSERT у
+Postgres (≈ кілька мс, весь `demo:publish` на 5 подій займає ≈ 0.7 с), тож
+10 × ~10 мс ≈ 0.1 с ≪ 30 хв (стоковий `consumer_timeout`, у compose його не
+змінено); `prefetch=1` для 2-мілісекундних задач дав би простій конвеєра на
+кожному round-trip ack-а, а дефолт брокера (0 = без ліміту) віддав би всю чергу
+першому ж споживачу.
+
+### Числа трьох прогонів (RabbitMQ 4.3.4, Postgres 16, 11.10.2026)
+
+| Демо | Вивід | Час |
+|------|-------|-----|
+| `demo:publish` | `published=5 delivered=5 effect=5 acked=5 work=0 dlq=0 unroutable=1 prefetch=10` | ≈ 0.7 с |
+| `demo:dlq` | `rejected=1 work=0 dlq=1 dlq-reason=rejected effect=0` | ≈ 0.7 с |
+| `demo:duplicate` | `deliveries=2 effect=1 skipped=1 redelivered=1 work=0 dlq=0` | ≈ 0.7 с |
+
+Кожне демо саме приводить стан до чистого (міграції, топологія, `purge` черг,
+очищення `order_receipts`), друкує підсумок і завершується з кодом ≠ 0, якщо
+інваріант порушено.
+
+- **`demo:dlq`** — отруєне повідомлення (не JSON) → `reject(requeue=false)` →
+  `shop.dlx` → DLQ. Причину читаємо з `x-first-death-reason` (і `x-death`):
+  `rejected`. Інші причини з чотирьох — `expired`, `maxlen`, `delivery_limit`;
+  п'ятої немає (протухання самої черги — не dead-letter).
+- **`demo:duplicate`** — повторна доставка викликана справжнім `SIGKILL`
+  дочірнього процесу-споживача **після** ефекту, але **до** ack (пауза
+  `CONSUMER_GAP_MS=3000`). Не `channel.close()`: воно коректне, а падіння в проді
+  — це зникнення процесу й обрив сокета. `deliveries=2` — дубль справді був;
+  `effect=1` — ефект застосовано один раз.
+
+### Чому це at-least-once, а не exactly-once
+
+Exactly-once **доставки** не існує: ack — односторонній сигнал по ненадійному
+каналу і означає «я більше не вимагаю повтору», а не «дійшло». Підтвердив рано
+(`autoAck`) — втрата; підтвердив пізно (ефект є, ack не доїхав) — повторна
+доставка; третього немає. Тому RabbitMQ тут дає **at-least-once доставку**
+(ручний ack після ефекту, confirm-публікація, DLQ для отрути), а **одиничний
+результат** забезпечує споживач: ефект записано через природний ключ
+`INSERT INTO order_receipts … ON CONFLICT (event_id) DO NOTHING`, де `event_id` —
+стабільний `eventId` події (детермінований від id замовлення, а не випадковий
+UUID на кожну спробу). Операція «додати чек» ідемпотентна за побудовою; якби
+ефектом було `qty = qty - 1`, довелося б вести ключ ідемпотентності.
+At-least-once доставка + ідемпотентний ефект = exactly-once **результат**.
+Сховище ключів — Postgres, а не `Set` у памʼяті: воно переживає рестарт
+споживача і спільне для реплік.
+
+Чесні межі (закриваються в ДЗ #22): (1) `checkout()` публікує **після** COMMIT —
+падіння між COMMIT і confirm лишає замовлення без події (спільного COMMIT бази й
+брокера не існує → transactional outbox); (2) якби позначка «оброблено» і ефект
+були окремими записами, між ними лишалась би щілина — тут вона відсутня лише тому,
+що ключ і ефект — це один і той самий INSERT; для зовнішнього ефекту її закриває
+спільна транзакція (`processed_messages`, ДЗ #22).
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -914,6 +1013,31 @@ sec=$(awk 'tolower($0) ~ /^#+ .*trade[ -]?off/{f=1;next} f && /^#+ /{exit} f' RE
 printf '%s\n' "$sec" | grep -cE '^ *\|? *:?-{3,}'   # >= 1 — рядок-роздільник таблиці
 printf '%s\n' "$sec" | grep -c '|'                   # >= 4 — шапка + роздільник + мінімум 2 рядки
 ```
+
+### hw-19 (RabbitMQ: публікація, ack, DLQ, ідемпотентність)
+
+Ті самі правила: без сховища, `SKIP_VAULT=1`, дев-креденшели з `docker-compose.yml`.
+`BROKER_URL` — схема `amqp`, порт **5672** (AMQP; на 15672 — вебморда, не AMQP).
+`--wait` обовʼязковий: healthcheck брокера — `rabbitmq-diagnostics -q check_running`.
+Демо самі накочують міграції (`order_receipts`) і оголошують топологію.
+
+```bash
+docker compose up -d --wait
+
+export BROKER_URL=amqp://app:app@127.0.0.1:5672
+export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_secret_pw DB_NAME=marketplace
+export SKIP_VAULT=1    # у грейдера немає доступу до сховища
+
+npm ci
+npx tsc --noEmit
+npm run build
+
+npm run demo:publish   # published=5 effect=5 dlq=0 prefetch=10
+npm run demo:dlq       # work=0 dlq=1 dlq-reason=rejected
+npm run demo:duplicate # deliveries=2 effect=1
+```
+
+З активним сховищем `BROKER_URL` береться з Infisical (`dev`) поруч із `DB_*`.
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
