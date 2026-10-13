@@ -12,17 +12,23 @@
 // UPDATE не тримає лок довше одного round-trip (на відміну від
 // FOR UPDATE, де лок живе, доки транзакція явно його не відпустить).
 //
-// Порядок локів у транзакції ЗАВЖДИ products -> users -> orders ->
-// order_items -> job_queue — однаковий у кожному викликові checkout(), тому
+// Порядок локів у транзакції ЗАВЖДИ idempotency_keys -> products -> users ->
+// orders -> order_items -> job_queue -> outbox — однаковий у кожному викликові checkout(), тому
 // дві конкурентні транзакції-чекаути ніколи не можуть чекати одна на одну
 // в протилежному порядку (передумова deadlock 40P01, лекція 14 крок 5).
 import { DataSource } from 'typeorm';
-import { buildOrderPlaced, OrderPlacedEvent } from './messaging/events';
+import { toOrderPlacedEvent } from './messaging/events';
 
-// hw-19: продюсер події — залежність-інтерфейс, а не клієнт брокера: checkout
-// не знає ні про RabbitMQ, ні про те, хто слухає order.placed.
-export interface OrderPlacedPublisher {
-  publishOrderPlaced(event: OrderPlacedEvent): Promise<void>;
+// hw-22: checkout НІЧОГО не публікує в брокер. Подія лягає в таблицю outbox тієї
+// самої бази, тією самою транзакцією, що й замовлення: COMMIT один, менеджер
+// ресурсів один. Винос назовні — окремий процес (src/outbox/relay.ts).
+// (hw-19 публікував після COMMIT: падіння між COMMIT і confirm губило подію.)
+
+// Точка впровадження збою для demo:crash-write — єдине місце, де демо може
+// вбити транзакцію РІВНО після INSERT в outbox, але до COMMIT. У проді не
+// передається.
+export interface CheckoutHooks {
+  afterOutboxInsert?(): void | Promise<void>;
 }
 
 //  TypeORM/pg: для
@@ -44,15 +50,18 @@ export interface CheckoutParams {
   buyerId: string;
   productId: string;
   quantity: number;
+  // hw-22, рівень 3: ключ ідентифікує НАМІР клієнта (одна спроба «купити»), а не
+  // байти тіла. Хеш тіла схлопнув би два легітимні однакові замовлення в одне.
+  idempotencyKey?: string;
 }
 
 export interface CheckoutSuccess {
   ok: true;
   orderId: string;
   totalAmount: number;
-  // hw-19: true, якщо order.placed підтверджено брокером (confirm). false —
-  // publisher не передано або публікація впала ПІСЛЯ COMMIT (див. коментар нижче).
-  eventPublished: boolean;
+  // true — це повтор запиту з уже відомим ключем: нове замовлення і нова подія
+  // НЕ створювались, повернуто результат першої спроби.
+  replayed: boolean;
 }
 
 export interface CheckoutFailure {
@@ -64,13 +73,42 @@ export type CheckoutResult = CheckoutSuccess | CheckoutFailure;
 
 export async function checkout(
   dataSource: DataSource,
-  { buyerId, productId, quantity }: CheckoutParams,
-  publisher?: OrderPlacedPublisher,
+  { buyerId, productId, quantity, idempotencyKey }: CheckoutParams,
+  hooks: CheckoutHooks = {},
 ): Promise<CheckoutResult> {
   const qr = dataSource.createQueryRunner();
   await qr.connect();
   await qr.startTransaction(); // READ COMMITTED (дефолт) — достатньо: атомарність дає сам UPDATE, не рівень ізоляції
   try {
+    // 0) ключ ідемпотентності — ПЕРШИМ і в цій самій транзакції. Рядок ключа
+    // з'являється лише разом із замовленням (один COMMIT), а відкат checkout
+    // (out_of_stock) звільняє ключ для повторної спроби. Паралельний дубль
+    // блокується на унікальному індексі до COMMIT/ROLLBACK першого — тому
+    // після розблокування бачить уже ЗАКОМІЧЕНИЙ результат, а не зайве списання.
+    if (idempotencyKey !== undefined) {
+      const claimed: Array<{ key: string }> = await qr.query(
+        `INSERT INTO idempotency_keys (key) VALUES ($1)
+         ON CONFLICT (key) DO NOTHING
+         RETURNING key`,
+        [idempotencyKey],
+      );
+      if (claimed.length === 0) {
+        const prev: Array<{ id: string; total_amount: string }> = await qr.query(
+          `SELECT o.id, o.total_amount
+           FROM idempotency_keys k JOIN orders o ON o.id = k.order_id
+           WHERE k.key = $1`,
+          [idempotencyKey],
+        );
+        await qr.rollbackTransaction(); // нічого не писали
+        return {
+          ok: true,
+          orderId: prev[0]!.id,
+          totalAmount: Number(prev[0]!.total_amount),
+          replayed: true,
+        };
+      }
+    }
+
     // 1) склад: атомарний декремент з перевіркою достатності в тому самому statement
     const stockRows = unwrapReturning<{ price: string }>(
       await qr.query(
@@ -130,30 +168,34 @@ export async function checkout(
       [orderId],
     );
 
-    await qr.commitTransaction();
-
-    // hw-19: подія — ПІСЛЯ COMMIT: брокер не може побачити замовлення, якого
-    // немає. Ціна: dual write. Падіння між COMMIT і confirm = замовлення є, події
-    // немає. Спільного COMMIT бази й брокера не існує; закриває це transactional
-    // outbox (ДЗ #22), тут цю межу лише називаємо.
-    let eventPublished = false;
-    if (publisher) {
-      try {
-        await publisher.publishOrderPlaced(
-          buildOrderPlaced({
-            orderId,
-            buyerId,
-            productId,
-            quantity,
-            totalAmount,
-          }),
-        );
-        eventPublished = true;
-      } catch (e) {
-        console.error(`order.placed для замовлення ${orderId} не опубліковано:`, e);
-      }
+    if (idempotencyKey !== undefined) {
+      await qr.query(`UPDATE idempotency_keys SET order_id = $1 WHERE key = $2`, [
+        orderId,
+        idempotencyKey,
+      ]);
     }
-    return { ok: true, orderId, totalAmount, eventPublished };
+
+    // 5) hw-22: подія в outbox — ТІЄЮ САМОЮ транзакцією. Контракт будується
+    // явною функцією, а не spread-ом рядка orders (схема БД ≠ публічний API).
+    // Жодного publish до COMMIT: брокер не вміє відкочуватись.
+    const event = toOrderPlacedEvent({
+      id: orderId,
+      buyerId,
+      productId,
+      quantity,
+      totalAmount,
+      placedAt: new Date(),
+    });
+    await qr.query(
+      `INSERT INTO outbox (aggregate_type, aggregate_id, type, payload)
+       VALUES ('Order', $1, $2, $3::jsonb)`,
+      [orderId, event.type, JSON.stringify(event)],
+    );
+
+    await hooks.afterOutboxInsert?.();
+
+    await qr.commitTransaction();
+    return { ok: true, orderId, totalAmount, replayed: false };
   } catch (e) {
     await qr.rollbackTransaction().catch(() => undefined);
     throw e;

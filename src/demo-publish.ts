@@ -1,11 +1,13 @@
-// hw-19, demo:publish — happy path: 5 реальних checkout() публікують order.placed
-// (confirm-канал), споживач з ручним ack і prefetch застосовує 5 ефектів.
+// hw-19, demo:publish — happy path: 5 реальних checkout() -> outbox (hw-22) -> relay
+// публікує order.placed (confirm-канал), споживач з ручним ack і prefetch застосовує
+// 5 ефектів. (До hw-22 checkout публікував сам після COMMIT — dual write.)
 import 'reflect-metadata';
 import { checkout } from './checkout';
 import { PREFETCH } from './messaging/config';
 import { startConsumer } from './messaging/consumer';
 import { assertInvariant, countEffects, kv, queueDepths, resetState, sleep, waitFor } from './messaging/demo-lib';
 import { EventPublisher } from './messaging/publisher';
+import { relayUntilEmpty } from './outbox/relay';
 import { DLQ, UNROUTABLE_QUEUE, WORK_QUEUE } from './messaging/topology';
 
 const EVENTS = 5;
@@ -29,11 +31,10 @@ async function main(): Promise<void> {
   const consumer = await startConsumer({ dataSource: ds, prefetch: PREFETCH });
   const publisher = await EventPublisher.connect();
 
-  let published = 0;
   for (let i = 0; i < EVENTS; i++) {
-    const r = await checkout(ds, { buyerId: buyer.id, productId: product.id, quantity: 1 }, publisher);
-    if (r.ok && r.eventPublished) published += 1;
+    await checkout(ds, { buyerId: buyer.id, productId: product.id, quantity: 1 });
   }
+  const published = await relayUntilEmpty(ds, publisher);
 
   // Контрольна публікація з routing key без binding: завдяки alternate exchange
   // вона не зникає мовчки, а лягає в shop.unroutable (у published не рахується).

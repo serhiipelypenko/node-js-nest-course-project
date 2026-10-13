@@ -27,6 +27,9 @@ export async function resetState(): Promise<DataSource> {
   const ds = createDataSource(10);
   await ds.initialize();
   await ds.runMigrations(); // ідемпотентно: потрібна order_receipts на свіжому клоні
+  // hw-22: inbox і outbox — частина стану ефекту; без них стара позначка
+  // «оброблено» з минулого прогону мовчки з'їла б нову подію з тим самим eventId.
+  await ds.query(`TRUNCATE outbox, processed_messages, idempotency_keys`);
   await ds.query(`DELETE FROM order_receipts`);
 
   const conn = await amqp.connect(brokerUrl());

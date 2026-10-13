@@ -39,3 +39,29 @@ export function buildOrderPlaced(data: OrderPlacedEvent['data']): OrderPlacedEve
     data,
   };
 }
+
+// hw-22: явний маппінг рядка замовлення -> контракт події. НЕ `{ ...order }`:
+// інакше схема таблиці orders стає публічним API, і перше ж перейменування
+// колонки ламає всіх консюмерів. occurredAt фіксується в момент запису в outbox
+// і далі не змінюється: повторна публікація віддає ті самі байти.
+export function toOrderPlacedEvent(order: {
+  id: string;
+  buyerId: string;
+  productId: string;
+  quantity: number;
+  totalAmount: number;
+  placedAt: Date;
+}): OrderPlacedEvent {
+  return {
+    eventId: eventIdFor('order.placed', order.id),
+    type: 'order.placed',
+    occurredAt: order.placedAt.toISOString(),
+    data: {
+      orderId: order.id,
+      buyerId: order.buyerId,
+      productId: order.productId,
+      quantity: order.quantity,
+      totalAmount: order.totalAmount,
+    },
+  };
+}
