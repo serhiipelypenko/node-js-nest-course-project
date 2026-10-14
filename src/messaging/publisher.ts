@@ -37,17 +37,24 @@ export class EventPublisher {
   async publishRaw(
     routingKey: string,
     content: Buffer,
-    props: { messageId?: string; type?: string } = {},
+    props: { messageId?: string; type?: string; throwIfUnroutable?: boolean } = {},
   ): Promise<void> {
+    const { throwIfUnroutable, ...amqpProps } = props;
+    const returnedBefore = this.returned;
     this.ch.publish(
       EXCHANGE,
       routingKey,
       content,
-      { persistent: true, contentType: 'application/json', mandatory: true, ...props },
+      { persistent: true, contentType: 'application/json', mandatory: true, ...amqpProps },
       // Кожна публікація чекає на ack брокера нижче; помилки nack приходять тут.
       () => undefined,
     );
     await this.ch.waitForConfirms();
+    // basic.return приходить ДО confirm. Для relay це критично: позитивний
+    // confirm на unroutable-повідомлення + published_at = «втрата з чистою совістю».
+    if (throwIfUnroutable && this.returned > returnedBefore) {
+      throw new Error(`повідомлення ${routingKey} не змаршрутизоване (basic.return)`);
+    }
   }
 
   async close(): Promise<void> {

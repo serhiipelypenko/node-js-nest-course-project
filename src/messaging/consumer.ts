@@ -1,7 +1,8 @@
 // hw-19: споживач order.placed.
 //  - noAck: false, ack ПІСЛЯ ефекту (ack = «я більше не вимагаю повтору»);
 //  - prefetch виставлено явно (PREFETCH у config.ts);
-//  - ефект ідемпотентний: INSERT ... ON CONFLICT (event_id) DO NOTHING у Postgres;
+//  - ефект ідемпотентний у двох рівнях (hw-22): inbox processed_messages + природний
+//    ключ order_id, обидва INSERT ... ON CONFLICT DO NOTHING в ОДНІЙ транзакції Postgres;
 //  - отруєне повідомлення (не JSON / не за контрактом) -> reject(requeue=false) -> DLX.
 import * as amqp from 'amqplib';
 import type { ChannelModel, ConsumeMessage } from 'amqplib';
@@ -41,17 +42,42 @@ export interface RunningConsumer {
   close(): Promise<void>;
 }
 
-/** true — ефект застосовано; false — подію вже оброблено (дубль). */
+// Імʼя консюмера в inbox: складений ключ (message_id, consumer) — те саме
+// повідомлення різні консюмери обробляють кожен окремо.
+export const CONSUMER_NAME = 'order-receipts';
+
+/**
+ * true — ефект застосовано; false — дубль.
+ *
+ * Два рівні ідемпотентності в ОДНІЙ транзакції (позначка в processed_messages і
+ * ефект — один COMMIT; позначка деінде, ніж ефект, — знову dual write):
+ *   рівень 2 (inbox): INSERT processed_messages ON CONFLICT DO NOTHING — вже
+ *     бачили message_id -> нічого не робимо;
+ *   рівень 1 (природний ключ): ефект — «квитанція замовлення існує»
+ *     (UNIQUE order_id), а не «збільшити лічильник»; повтор нічого не змінює навіть
+ *     якщо inbox почистили за TTL.
+ */
 export async function applyOrderPlaced(ds: DataSource, e: OrderPlacedEvent): Promise<boolean> {
-  const rows: unknown = await ds.query(
-    `INSERT INTO order_receipts (event_id, order_id, buyer_id, total_amount)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (event_id) DO NOTHING
-     RETURNING event_id`,
-    [e.eventId, e.data.orderId, e.data.buyerId, e.data.totalAmount],
-  );
-  // INSERT ... RETURNING у TypeORM повертає масив рядків (не tuple, як UPDATE)
-  return Array.isArray(rows) && rows.length > 0;
+  return ds.transaction(async (m) => {
+    // INSERT ... RETURNING у TypeORM повертає масив рядків (не tuple, як UPDATE)
+    const seen: unknown = await m.query(
+      `INSERT INTO processed_messages (message_id, consumer)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING message_id`,
+      [e.eventId, CONSUMER_NAME],
+    );
+    if (!Array.isArray(seen) || seen.length === 0) return false; // дубль: ack і далі
+
+    const rows: unknown = await m.query(
+      `INSERT INTO order_receipts (event_id, order_id, buyer_id, total_amount)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING
+       RETURNING event_id`,
+      [e.eventId, e.data.orderId, e.data.buyerId, e.data.totalAmount],
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  });
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
