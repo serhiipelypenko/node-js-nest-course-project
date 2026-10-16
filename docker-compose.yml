@@ -81,6 +81,53 @@ services:
       retries: 20
       start_period: 10s
 
+  # hw-23: ДВА інстанси Redis — не примха. Кеш вимагає maxmemory + allkeys-lru
+  # (витіснення — норма), BullMQ — noeviction («cannot work properly if Redis
+  # evicts keys arbitrarily»). maxmemory-policy одна на весь процес, SELECT 1 її
+  # не розводить. Порти 6379/6380 — поза діапазоном лекції 22300-22399.
+  redis-cache:
+    image: redis:8-alpine
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "32mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Черга BullMQ + сесії: noeviction і AOF everysec. Зберігаємо стан, який
+  # не можна тихо втратити (сесія, задача). maxmemory не ставимо: при ліміті
+  # noeviction віддасть OOM на запис, а не викине чужий ключ.
+  redis-queue:
+    image: redis:8-alpine
+    command:
+      - "redis-server"
+      - "--maxmemory-policy"
+      - "noeviction"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_queue_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # hw-16: Pact Broker — контракт живе тут, а не в pacts/*.json консюмера;
   # can-i-deploy питає саме цей сервіс. Власна маленька база, ІЗОЛЬОВАНА від
   # `db` застосунку: брокер не має жодного стосунку до домену Marketplace.
@@ -115,3 +162,4 @@ services:
 
 volumes:
   db_data:
+  redis_queue_data:

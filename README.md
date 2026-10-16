@@ -39,6 +39,13 @@
   (`ON CONFLICT DO NOTHING`), ізольовані транзакції у RabbitMQ (див. розділ
   [Outbox та ідемпотентність](#outbox-та-ідемпотентність)).
 
+- **hw-23** — Redis: cache-aside з TTL+джитером і single-flight локом проти
+  stampede, сесії з rolling TTL, rate-limit (ковзне вікно) на спільному сховищі,
+  черга BullMQ (retry/backoff, дедуплікація за `jobId`, `upsertJobScheduler`) на
+  окремому Redis із `noeviction`; чотири демо `demo:cache` / `demo:session` /
+  `demo:ratelimit` / `demo:queue` (див. розділ
+  [Redis: кеш, сесії, ліміти, черга](#redis-кеш-сесії-ліміти-черга)).
+
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
@@ -952,6 +959,129 @@ outbox не повʼязаний: `orders-api.ts` — окремий HTTP-кра
 як і решта data-шару. Мігрувати relay на CDC (Debezium + Outbox Event Router) можна без
 зміни консюмерів — таблиця вже в канонічній формі.
 
+## Redis: кеш, сесії, ліміти, черга
+
+Redis не робить систему правильною — він робить її **швидкою**. Усе, що тут
+захищено Redis-ом, або є оптимізацією (кеш, лок проти stampede), або мусить мати
+атомарність, яку дає Lua (ліміт). Бізнес-інваріанти (stock, баланс, ідемпотентність
+замовлення) лишаються в Postgres, як у hw-14/22.
+
+| Файл | Призначення |
+|------|-------------|
+| `src/redis/cache.ts` | `CacheAside`: TTL=300+random(0..60) с, single-flight лок, compare-and-delete, кеш ніколи не валить запит |
+| `src/redis/product-card.ts` | «важке» читання — картка товару: `JOIN reviews` + `AVG(rating)` + залишок |
+| `src/redis/session.ts` | `SessionStore` (`GETEX` = rolling TTL) + connect-style middleware |
+| `src/redis/rate-limit.ts` | `RateLimiter`: ковзне вікно одним Lua-скриптом, 429 + `Retry-After` |
+| `src/redis/queue.ts` | BullMQ: `attempts`, exponential backoff + jitter, `jobId`, `upsertJobScheduler` |
+| `src/migrations/…-Reviews.ts` | таблиця `reviews` — джерело рейтингу |
+| `src/demo-{cache,session,ratelimit,queue}.ts` | самоочисні демо, друкують `ключ=число` |
+
+### Чому Redis-інстансів два (і де що живе)
+
+`docker-compose.yml`: **`redis-cache`** (`:6379`, `--maxmemory 32mb --maxmemory-policy
+allkeys-lru`, без персистентності) і **`redis-queue`** (`:6380`, `--maxmemory-policy
+noeviction --appendonly yes --appendfsync everysec`). Інстансів два, бо
+`maxmemory-policy` — одна на весь процес Redis і `SELECT 1` її не розводить: кеш
+**хоче**, щоб Redis викидав ключі, а BullMQ каже, що черга «cannot work properly if
+Redis evicts keys arbitrarily». Підключити BullMQ до кеш-інстансу — значить отримати
+`IMPORTANT! Eviction policy is allkeys-lru` у логу й задачі, що зникають.
+
+- **Сесії → `redis-queue`** (обрано свідомо). На кеш-інстансі `allkeys-lru` рано чи пізно
+  викинув би живу сесію — розлогінення, яке неможливо відтворити. Третій контейнер
+  чистіший, але для цього обсягу зайвий; ціна рішення — сесії ділять памʼять із чергою
+  (при заповненні `noeviction` дасть OOM на запис, а не тихо втратить дані).
+- **Лічильники ліміту → `redis-cache`**: втрата лічильника = клієнту на мить дозволили
+  трохи більше, не втрата даних.
+- Змінні: `REDIS_URL` (кеш) і `REDIS_QUEUE_URL` (черга) — зі сховища ДЗ #11 через
+  `scripts/with-secrets.sh`, у `env.schema.ts`/`.env.example` їх немає (як `DB_*`, `BROKER_URL`).
+
+### 1–2. Cache-aside + джитер + single-flight
+
+Читання: `GET card:<id>` → влучання повертається; промах → (лок) → `SELECT` → `SET … EX`.
+TTL ставиться **завжди** = `300 + random(0..60)`, інакше ключі, прогріті одним циклом,
+протухають в одну секунду. Явна інвалідація (`CacheAside.invalidate`, її викликає
+обробник `recalc-rating`) — **додатково** до TTL, не замість.
+
+Single-flight: `SET lock:card:<id> <token> NX PX 5000`; той, хто взяв, робить **один**
+`SELECT` (після взяття лока кеш перечитується ще раз — інакше «запізнілий» отримав би
+лок, коли лідер уже заповнив кеш і зняв свій), решта кожні 20 мс перечитує кеш. Знімається
+лок Lua compare-and-delete (`if get == token then del`), не голим `DEL`. Redis-помилки
+(недоступність, OOM) кеш ковтає й іде в базу.
+
+`db-calls` рахується **на рівні драйвера**: `DataSource` демо має `QueryCountLogger`
+(`logging: ['query']`), тобто рахуються SQL-запити, що реально пішли в Postgres, а не
+виклики нашої функції.
+
+Власні числа (Node v22.14.0, Redis 8, Postgres 16, 16.10.2026; 4 поспіль прогони):
+
+| Що | Результат |
+|----|-----------|
+| прогріто карток / різних TTL | 60 / 35–41 (без джитера було б 1) |
+| ключ витіснено по-справжньому (заливка холодних даних під `allkeys-lru`, не `DEL`) | так, кого забрав LRU — вирішує його вибірка |
+| 50 одночасних, наївний cache-aside | **50** походів у базу |
+| 50 одночасних, single-flight | **1** похід (`db-calls=1`) |
+| 100 читань теплого кеша | **0** походів (`db-calls-warm=0`) |
+| час хвилі | 8–27 мс наївно, ≈24 мс із локом |
+
+Час із локом на цьому стенді **не кращий**: 49 очікувальників сплять по 20 мс (інтервал
+опитування), а база з крихітною таблицею витримує 50 однакових `SELECT` за ~10 мс. Лок
+економить навантаження на базу (50→1), а не мілісекунди в кожному запиті; на реально
+важкому запиті виграш і в часі видно.
+
+### 3. Сесії з rolling TTL
+
+Сесія — ключ `sess:<id>` (JSON) на `redis-queue`, TTL 20 с у демо. Кожен запит проходить
+через `GETEX key EX ttl`: читання **і** подовження за одну команду, тож активного
+користувача не викине посеред роботи. Демо ганяє справжній HTTP (`node:http` + `fetch`
+із cookie), чекає 2 с між запитами (`pttl` перед = 17992, після активності = 19998 →
+`ttl-renewed=1`), потім «перезапускає процес» (новий сервер, новий `SessionStore`, нове
+зʼєднання) — той самий cookie далі веде в ту саму сесію (`sessions=1`, лічильник візитів
+не скинувся). Стан у Redis, не в памʼяті процесу. Власна реалізація на трьох командах
+замість `connect-redis` (ESM-only, Node ≥22).
+
+### 4. Rate-limit
+
+Ковзне вікно (ZSET часових міток, один Lua-скрипт: `ZREMRANGEBYSCORE` + `ZCARD` +
+`ZADD`, час із `TIME` Redis-а, а не з годинників подів). **Чому ковзне вікно:** сплеск
+на межі вікна нам не потрібен — фіксоване вікно пропускає до 2× ліміту навколо границі,
+а token bucket свідомо віддає залп. Перевищення → `429` + `Retry-After` (секунди до
+звільнення найстарішого слота, ≥1). Недоступний Redis → fail-open (сервіс важливіший за
+ліміт). Демо піднімає **два** незалежні екземпляри (окремі зʼєднання й HTTP-сервери),
+14 запитів одного клієнта чергуються між ними: `limit=5 allowed=5 blocked=9 status=429
+retry-after=1`; лічильник у памʼяті процесу дав би `allowed=10`.
+
+### 5–6. Черга BullMQ
+
+`attempts: 4`, `backoff: { type: 'exponential', delay: 200, jitter: 0.5 }`, `jobId =
+recalc-rating-<productId>` (BullMQ забороняє `:` в id), `removeOnComplete: { age: 3600 }`
+(**не** `true` — він вимикає дедуплікацію за `jobId`). Планувальник — `upsertJobScheduler`
+(двічі підряд = один планувальник; repeatable-API в BullMQ 6 прибрано). Worker має
+`maxRetriesPerRequest: null`, Queue — ні (падати швидко). Демо: `added=2 queued=1`
+(два `add` з одним `jobId` — одна задача), обробник падає двічі → `attempts=3
+completed=1`; після завершення третій `add` теж не створює дубліката (`age`-запас);
+`schedulers=1 scheduled-runs=6` за 3 с при `every: 500`. `queue-noeviction=1` читається
+з `CONFIG GET maxmemory-policy` черги, `cache-lru=1` — з кеш-інстансу: один інстанс не
+може дати обидва.
+
+> Обробник `recalc-rating` у демо — стаб (рахує спроби); у застосунку його
+> `recalcRating`-залежність має перерахувати рейтинг у базі й викликати
+> `CacheAside.invalidate`. HTTP-контролери Nest лишаються in-memory (як і в hw-22) —
+> Redis-шар підключено до CLI/демо-шляху.
+
+### Що станеться, якщо stampede-лок зламається
+
+Лок (`SET NX PX` + token) тут — **оптимізація, не інваріант**. Якщо він зламається (лок
+протух під паузою процесу — GC, page fault; Redis перезапустився без AOF; failover
+втратив ключ), двоє одночасно вирішать, що вони лідери, і обидва зроблять `SELECT` картки.
+Обидва запишуть у кеш **те саме** читання (картка — чиста функція від стану бази),
+останній `SET` просто перезапише попередній. Ціна — зайвий читальний запит (кілька
+центів на графіку навантаження), стан не псується; без fencing token нам нічого й не
+треба, бо немає чого фенсити. Саме тому тут достатньо одного Redis без Redlock.
+Той самий `SET NX PX` у ролі захисту бізнес-інваріанта (двічі списати гроші, двічі
+зменшити stock) коштував би зіпсованого стану — для такого є транзакція, унікальний
+індекс (`idempotency_keys`, `order_receipts.order_id`) або fencing token, який перевіряє
+саме сховище. **Лок не замінює ідемпотентність.**
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -1175,6 +1305,59 @@ awk -F= '/^deliveries=/{ok=($2>=2)} END{exit !ok}' /tmp/c.txt && echo "deliverie
 for k in applied=1 effect=1 processed=1; do
   grep -qx "$k" /tmp/c.txt || echo "НЕМАЄ: $k"
 done
+```
+
+### hw-23 (Redis: кеш, сесії, ліміти, черга)
+
+Без сховища, `SKIP_VAULT=1`, дев-креденшели з `docker-compose.yml`. Два Redis:
+кеш (`redis://127.0.0.1:6379`, `allkeys-lru`) і черга (`redis://127.0.0.1:6380`,
+`noeviction`). `--wait` обовʼязковий. `demo:cache` сам накочує міграції (`reviews`);
+усі чотири демо ходять у Redis через `bash scripts/with-secrets.sh dev …`.
+
+```bash
+docker compose up -d --wait
+
+export REDIS_URL=redis://127.0.0.1:6379
+export REDIS_QUEUE_URL=redis://127.0.0.1:6380
+export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_secret_pw DB_NAME=marketplace
+export SKIP_VAULT=1    # у грейдера немає доступу до сховища
+
+npm ci
+npx tsc --noEmit
+npm run build
+
+npm run demo:cache | tee /tmp/c.txt; echo "exit=${PIPESTATUS[0]}"
+for k in db-calls=1 db-calls-warm=0 cache-lru=1 cache-maxmemory=1; do
+  grep -qx "$k" /tmp/c.txt || echo "НЕМАЄ: $k"
+done
+awk -F= '/^concurrent=/{ok=($2>=20)} END{exit !ok}' /tmp/c.txt && echo "concurrent>=20 OK"
+awk -F= '/^warmed=/{ok=($2>=50)}      END{exit !ok}' /tmp/c.txt && echo "warmed>=50 OK"
+awk -F= '/^ttl-distinct=/{ok=($2>=5)} END{exit !ok}' /tmp/c.txt && echo "ttl-distinct>=5 OK"
+
+npm run demo:session | tee /tmp/s.txt; echo "exit=${PIPESTATUS[0]}"
+for k in sessions=1 in-redis=1 ttl-renewed=1; do
+  grep -qx "$k" /tmp/s.txt || echo "НЕМАЄ: $k"
+done
+awk -F= '/^requests=/{ok=($2>=3)} END{exit !ok}' /tmp/s.txt && echo "requests>=3 OK"
+
+npm run demo:ratelimit | tee /tmp/r.txt; echo "exit=${PIPESTATUS[0]}"
+for k in status=429 retry-after=1; do
+  grep -qx "$k" /tmp/r.txt || echo "НЕМАЄ: $k"
+done
+awk -F= '/^instances=/{i=$2} /^limit=/{l=$2} /^allowed=/{a=$2} /^blocked=/{b=$2}
+  END{exit !(i>=2 && l>0 && a==l && b>=1)}' /tmp/r.txt && echo "instances/allowed/blocked OK"
+
+npm run demo:queue | tee /tmp/q.txt; echo "exit=${PIPESTATUS[0]}"
+for k in completed=1 added=2 queued=1 queue-noeviction=1; do
+  grep -qx "$k" /tmp/q.txt || echo "НЕМАЄ: $k"
+done
+awk -F= '/^attempts=/{ok=($2>=3)} END{exit !ok}' /tmp/q.txt && echo "attempts>=3 OK"
+awk -F= '/^schedulers=/{ok=($2>=1)} END{exit !ok}' /tmp/q.txt && echo "schedulers>=1 OK"
+awk -F= '/^scheduled-runs=/{ok=($2>=2)} END{exit !ok}' /tmp/q.txt && echo "scheduled-runs>=2 OK"
+
+# кеш і черга — на різних інстансах
+grep -qx 'cache-lru=1' /tmp/c.txt && grep -qx 'queue-noeviction=1' /tmp/q.txt \
+  && echo "два інстанси OK" || echo "кеш і черга на одному інстансі"
 ```
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
