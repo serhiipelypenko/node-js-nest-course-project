@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { INestApplication } from '@nestjs/common';
 import { Verifier, VerifierOptions } from '@pact-foundation/pact';
+import { setAuthEnv } from '../testkit/auth-env';
 import { startPg, PgHandle } from '../testkit/pg-container';
 
 const PROVIDER_PORT = 3701;
@@ -39,6 +40,7 @@ describe('Pact provider verification · marketplace-api проти контра�
     pg = await startPg('(contract provider)');
     process.env.DB_URL = pg.dbUrlWithoutPassword;
     process.env.DB_PASSWORD_FILE = pg.passwordFile;
+    setAuthEnv(); // hw-24: ключ підпису обовʼязковий; контракт покриває лише публічний каталог
 
     // require, а НЕ import: ConfigModule.forRoot({ validate }) у
     // src/app.module.ts валідує process.env синхронно в момент першого

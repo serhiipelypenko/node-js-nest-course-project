@@ -3,6 +3,10 @@
 // міняється через HTTP (PATCH /orders/:id/status), і лише клієнт у кімнаті
 // orders:<A> має це побачити.
 //
+// hw-24: API закрите, тож скрипт потребує ТРЬОХ access-токенів із оточення
+// (отримай через POST /auth/login): ACCESS_A, ACCESS_B — два покупці,
+// ACCESS_SELLER — продавець/адмін (лише вони можуть PATCH статусу).
+//
 // Використання:
 //   node scripts/realtime-demo.mjs               # основний прогін: різні кімнати
 //   node scripts/realtime-demo.mjs --same-room   # контрольний: обидва в кімнаті A
@@ -15,17 +19,24 @@ import { io } from 'socket.io-client';
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3000';
 const SAME_ROOM = process.argv.includes('--same-room');
 
-async function createOrder(buyerId) {
+const { ACCESS_A, ACCESS_B, ACCESS_SELLER } = process.env;
+if (!ACCESS_A || !ACCESS_B || !ACCESS_SELLER) {
+  console.error('потрібні ACCESS_A, ACCESS_B, ACCESS_SELLER (access-токени з POST /auth/login)');
+  process.exit(1);
+}
+
+async function createOrder(label, token) {
   const res = await fetch(`${BASE_URL}/orders`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'idempotency-key': `realtime-demo-${buyerId}-${Date.now()}-${Math.random()}`,
+      authorization: `Bearer ${token}`,
+      'idempotency-key': `realtime-demo-${label}-${Date.now()}-${Math.random()}`,
     },
-    body: JSON.stringify({ items: [{ product_id: 'p1', quantity: 1 }], buyer_id: buyerId }),
+    body: JSON.stringify({ items: [{ product_id: 'p1', quantity: 1 }] }),
   });
   if (!res.ok) {
-    throw new Error(`POST /orders (${buyerId}) -> ${res.status} ${await res.text()}`);
+    throw new Error(`POST /orders (${label}) -> ${res.status} ${await res.text()}`);
   }
   return res.json();
 }
@@ -33,7 +44,7 @@ async function createOrder(buyerId) {
 async function setStatus(orderId, status) {
   const res = await fetch(`${BASE_URL}/orders/${orderId}/status`, {
     method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${ACCESS_SELLER}` },
     body: JSON.stringify({ status }),
   });
   if (!res.ok) {
@@ -42,9 +53,9 @@ async function setStatus(orderId, status) {
   return res.json();
 }
 
-function connect(buyerId) {
+function connect(token) {
   return io(BASE_URL, {
-    auth: { buyerId },
+    auth: { token },
     reconnection: false,
   });
 }
@@ -64,17 +75,17 @@ function join(socket, orderId) {
 }
 
 async function main() {
-  const orderA = await createOrder('demo-buyer-a');
-  const orderB = await createOrder('demo-buyer-b');
-  console.log(`замовлення A=${orderA.id} (demo-buyer-a), B=${orderB.id} (demo-buyer-b)`);
+  const orderA = await createOrder('a', ACCESS_A);
+  const orderB = await createOrder('b', ACCESS_B);
+  console.log(`замовлення A=${orderA.id}, B=${orderB.id}`);
   console.log(SAME_ROOM ? 'режим: --same-room (контрольний)' : 'режим: основний (різні кімнати)');
 
-  const clientA = connect('demo-buyer-a');
+  const clientA = connect(ACCESS_A);
   // Контрольний режим: B заходить у кімнату A, тому й підключається під
-  // тим самим buyerId, що й власник A — інакше join(orderA.id) від B
+  // тим самим токеном, що й власник A — інакше join(orderA.id) від B
   // відхилила б перевірка власності, і ми виміряли б відмову
   // на join, а не ізоляцію кімнат.
-  const clientB = connect(SAME_ROOM ? 'demo-buyer-a' : 'demo-buyer-b');
+  const clientB = connect(SAME_ROOM ? ACCESS_A : ACCESS_B);
 
   let aReceived = false;
   let bReceived = false;
