@@ -11,17 +11,24 @@ info:
 servers:
   - url: http://localhost:3000
     description: Локальний застосунок
-# Авторизації в API поки свідомо немає — це майбутнє ДЗ.
-security: []
+# hw-24: усе, крім явно відкритих операцій (security: [] нижче), вимагає
+# Bearer-access-токен. Саму перевірку (підпис, exp, денилист) робить Nest-гард,
+# а не валідатор спеки: у main.ts стоїть validateSecurity: false, інакше
+# валідатор відповів би за гард власним 401 без problem+json.
+security:
+  - bearerAuth: []
 tags:
   - name: products
     description: Каталог товарів
   - name: orders
     description: Замовлення покупців
+  - name: auth
+    description: Автентифікація (hw-24)
 paths:
   /products:
     get:
       operationId: listProducts
+      security: []
       summary: Список товарів
       description: Сторінка каталогу товарів із cursor-пагінацією.
       tags: [products]
@@ -37,9 +44,36 @@ paths:
                 $ref: '#/components/schemas/ProductPage'
         '400':
           $ref: '#/components/responses/BadRequest'
+    post:
+      operationId: createProduct
+      summary: Додати товар
+      description: >
+        Рівень РОЛІ (hw-24): лише seller або admin. Покупець (customer) із
+        валідним токеном отримує 403, без токена — 401.
+      tags: [products]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductRequest'
+      responses:
+        '201':
+          description: Товар створено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /products/{id}:
     get:
       operationId: getProduct
+      security: []
       summary: Отримати товар за ідентифікатором
       tags: [products]
       parameters:
@@ -63,6 +97,8 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '200':
           description: Сторінка замовлень
           content:
@@ -99,6 +135,8 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateOrderRequest'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '201':
           description: Замовлення створено
           content:
@@ -115,6 +153,10 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrderId'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Замовлення
           content:
@@ -141,6 +183,10 @@ paths:
             schema:
               $ref: '#/components/schemas/UpdateOrderStatusRequest'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Статус оновлено
           content:
@@ -155,7 +201,82 @@ paths:
   # нескінченний text/event-stream, а не JSON, звірити зі схемою нічого;
   # ignoreUndocumented: true в src/main.ts пропускає його так само, як
   # /health, /health/db.
+  /auth/login:
+    post:
+      operationId: login
+      summary: Логін — видача пари токенів
+      description: >
+        Автентифікація: email + пароль -> access (JWT, короткий) і refresh
+        (непрозорий, довгий). Кожен логін відкриває нову сімʼю refresh-токенів.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Пара токенів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/refresh:
+    post:
+      operationId: refreshTokens
+      summary: Ротація refresh-токена
+      description: >
+        Обмінює refresh на НОВУ пару і вбиває старий. Повторне пред'явлення
+        вже використаного refresh — сигнал компрометації: уся сімʼя
+        відкликається, а відповідь — 401 (RFC 9700 §4.14.2).
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Нова пара токенів
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Логаут — дві дії
+      description: >
+        (1) відкликає сімʼю refresh-токенів поточної сесії, (2) кладе jti
+        поточного access-токена в денилист із TTL = залишок його життя.
+        Обидві дії — в одній транзакції Postgres.
+      tags: [auth]
+      responses:
+        '204':
+          description: Сесію закрито
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Access-токен ES256. Немає / протух / зіпсований — 401; валідний, але
+        прав немає — 403.
   parameters:
     Limit:
       name: limit
@@ -240,9 +361,9 @@ components:
         buyer_id:
           type: string
           description: >
-            Власник замовлення. Використовує WS-gateway (hw-18) для
-            перевірки на join у кімнату orders/{id} — анонімному або
-            чужому клієнту відмовляє.
+            Власник замовлення (id користувача з access-токена, hw-24).
+            Використовує WS-gateway (hw-18) для перевірки на join у кімнату
+            orders/{id} — анонімному або чужому клієнту відмовляє.
           example: u1
         items:
           type: array
@@ -285,9 +406,11 @@ components:
             $ref: '#/components/schemas/OrderItem'
         buyer_id:
           type: string
+          deprecated: true
           description: >
-            Власник замовлення. Необовʼязковий — якщо не переданий,
-            замовлення належить гостю ('guest'), як і до hw-18.
+            hw-24: ІГНОРУЄТЬСЯ. Власник замовлення — це sub із access-токена;
+            довіряти полю з тіла означало б дозволити створювати замовлення
+            від чужого імені.
           example: u1
     UpdateOrderStatusRequest:
       type: object
@@ -297,6 +420,52 @@ components:
           type: string
           enum: [new, packed, shipped, delivered, cancelled]
           example: packed
+    CreateProductRequest:
+      type: object
+      required: [name, price_cents]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: Веб-камера
+        price_cents:
+          type: integer
+          minimum: 0
+          example: 99900
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          example: alice@auth.test
+        password:
+          type: string
+          minLength: 1
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          minLength: 1
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: Підписаний JWT (ES256), короткий TTL.
+        refresh_token:
+          type: string
+          description: Непрозорий випадковий рядок (НЕ JWT). У БД лежить лише його HMAC.
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Секунд до exp access-токена.
+          example: 600
     Problem:
       type: object
       description: RFC 9457 problem+json — єдина форма помилки для всіх 4xx.
@@ -332,6 +501,22 @@ components:
             $ref: '#/components/schemas/Problem'
     NotFound:
       description: Ресурс не знайдено
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: >
+        Немає, протух або зіпсований токен (підпис, exp, денилист) —
+        клієнт має піти рефрешити токен або перелогінитись.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: >
+        Токен валідний, але прав немає (роль або власність) — рефреш
+        нічого не змінить.
       content:
         application/problem+json:
           schema:

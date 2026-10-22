@@ -1,4 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import type { AuthUser } from '../auth/auth.types';
 import { Page, paginate } from '../common/cursor';
 import { ProductsService } from '../products/products.service';
 import { OrderEventsService } from './order-events.service';
@@ -69,6 +70,28 @@ export class OrdersService {
     return paginate(ORDERS, limit, cursor);
   }
 
+  // Рівень ВЛАСНОСТІ (hw-24). Перевіряється тут, ПІСЛЯ завантаження ресурсу, а
+  // не в гарді: гард стоїть до handler-а й не знає buyer_id замовлення — щоб
+  // його дізнатись, довелося б ходити по ресурс двічі. Зі справжньою БД це був
+  // би один запит `… WHERE id = $1 AND buyer_id = $2` (без рядка — 404/403 без
+  // другого round-trip). admin бачить усе.
+  getOwned(id: string, user: AuthUser): Order {
+    const order = this.getById(id);
+    if (order.buyer_id !== user.id && user.role !== 'admin') {
+      throw new ForbiddenException({
+        code: 'not-owner',
+        detail: 'це замовлення належить іншому користувачеві',
+      });
+    }
+    return order;
+  }
+
+  // Список: той самий принцип — фільтр за власником ДО пагінації, а не після.
+  listFor(user: AuthUser, limit: number, cursor?: string): Page<Order> {
+    const visible = user.role === 'admin' ? ORDERS : ORDERS.filter((o) => o.buyer_id === user.id);
+    return paginate(visible, limit, cursor);
+  }
+
   getById(id: string): Order {
     const order = ORDERS.find((o) => o.id === id);
     if (!order) {
@@ -77,7 +100,7 @@ export class OrdersService {
     return order;
   }
 
-  create(items: OrderItem[], buyerId = 'guest'): Order {
+  create(items: OrderItem[], buyerId: string): Order {
     const totalCents = items.reduce((sum, item) => {
       const [product] = this.products.findByIds([item.product_id]);
       return sum + (product?.price_cents ?? 0) * item.quantity;

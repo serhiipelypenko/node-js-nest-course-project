@@ -28,6 +28,8 @@ export class ProblemJsonFilter implements ExceptionFilter {
       if (b.code) extra.code = b.code;
     }
 
+    // RFC 6750 §3: 401 мусить казати, ЯКОЮ схемою автентифікуватись.
+    if (status === 401) res.setHeader('WWW-Authenticate', 'Bearer');
     writeProblem(res, req, status, detail, extra);
   }
 }

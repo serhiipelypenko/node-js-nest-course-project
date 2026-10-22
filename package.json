@@ -2,10 +2,11 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
+    "start:vault": "bash scripts/with-secrets.sh dev npm start",
     "start:dev": "nest start --watch",
     "check:env": "node scripts/check-env-example.mjs",
     "lint:spec": "redocly lint openapi/openapi.yaml",
@@ -36,7 +37,11 @@
     "test:contract": "npm run build && jest --config test/jest-contract.config.js --testPathPatterns=consumer",
     "verify:provider": "npm run build && jest --config test/jest-contract.config.js --testPathPatterns=provider.verify",
     "broker:up": "docker compose up -d --wait pact-broker",
-    "broker:down": "docker compose rm -sf pact-broker pact-broker-db"
+    "broker:down": "docker compose rm -sf pact-broker pact-broker-db",
+    "demo:auth": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-auth.js",
+    "demo:reuse": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-reuse.js",
+    "demo:rbac": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-rbac.js",
+    "auth:fingerprint": "bash scripts/with-secrets.sh dev node scripts/jwt-fingerprint.mjs"
   },
   "dependencies": {
     "@nestjs/common": "10.4.22",
@@ -49,6 +54,7 @@
     "bullmq": "^6.3.15",
     "express-openapi-validator": "5.6.2",
     "ioredis": "^5.11.1",
+    "jsonwebtoken": "^9.0.3",
     "pg": "8.13.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
@@ -66,6 +72,7 @@
     "@testcontainers/postgresql": "^12.1.0",
     "@types/express": "4.17.21",
     "@types/jest": "^30.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "22.10.5",
     "@types/pg": "8.11.10",
     "@types/supertest": "^7.2.1",

@@ -54,6 +54,15 @@ services:
       # (сервіс `pgbouncer`, порт 6432), а не напряму в `db`; пароля в DSN немає
       DB_URL: postgres://marketplace@pgbouncer:6432/marketplace
       DB_PASSWORD_FILE: /run/secrets/db_password
+      # hw-24: ключ підпису й «перець» — зі СХОВИЩА, не з цього файла (у git їм
+      # не місце): `bash scripts/with-secrets.sh dev docker compose up --build`
+      # прокидає їх з оточення. Порожні -> api падає на валідації й називає змінну.
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
+      JWT_KID: ${JWT_KID:-}
+      REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-}
+      JWT_PREVIOUS_KID: ${JWT_PREVIOUS_KID:-}
+      JWT_PREVIOUS_PUBLIC_KEY: ${JWT_PREVIOUS_PUBLIC_KEY:-}
     volumes:
       # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає
       - ./secrets/db_password:/run/secrets/db_password:ro

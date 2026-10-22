@@ -15,6 +15,8 @@ const PRODUCTS: Product[] = [
   { id: 'p5', name: 'Навушники', price_cents: 219900 },
 ];
 
+let nextId = 6;
+
 @Injectable()
 export class ProductsService {
   list(limit: number, cursor?: string): Page<Product> {
@@ -31,5 +33,11 @@ export class ProductsService {
 
   findByIds(ids: string[]): Product[] {
     return PRODUCTS.filter((p) => ids.includes(p.id));
+  }
+
+  create(name: string, priceCents: number): Product {
+    const product: Product = { id: `p${nextId++}`, name, price_cents: priceCents };
+    PRODUCTS.push(product);
+    return product;
   }
 }
