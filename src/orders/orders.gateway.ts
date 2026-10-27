@@ -10,6 +10,8 @@ import {
 } from '@nestjs/websockets';
 import { Subscription } from 'rxjs';
 import { Server, Socket } from 'socket.io';
+import { AuthService } from '../auth/auth.service';
+import type { AuthUser } from '../auth/auth.types';
 import { OrderEventsService } from './order-events.service';
 import { OrdersService } from './orders.service';
 
@@ -37,6 +39,7 @@ export class OrdersGateway implements OnGatewayConnection, OnModuleInit, OnModul
   constructor(
     private readonly orderEvents: OrderEventsService,
     private readonly orders: OrdersService,
+    private readonly auth: AuthService,
   ) {}
 
   onModuleInit(): void {
@@ -52,20 +55,30 @@ export class OrdersGateway implements OnGatewayConnection, OnModuleInit, OnModul
     this.eventsSubscription?.unsubscribe();
   }
 
-  // Ідентичність покупця береться з handshake (auth-payload), а не з
-  // тіла join — курсовий поки без реальної авторизації (openapi.yaml:
-  // "security: []"), тому це навмисно проста заглушка під майбутнє ДЗ
-  // з JWT, а не крипто-перевірка.
+  // hw-24: ідентичність — з access-токена в handshake (`io(url, { auth: { token } })`),
+  // перевіреного так само, як і в HTTP (підпис, exp, денилист). Заглушка
+  // `buyerId` з hw-18 прибрана: клієнт міг назвати себе ким завгодно. Без
+  // валідного токена сокет лишається анонімним і в жодну кімнату не потрапить.
   handleConnection(client: Socket): void {
-    const buyerId = client.handshake.auth?.buyerId ?? client.handshake.query?.buyerId;
-    client.data.buyerId = typeof buyerId === 'string' ? buyerId : undefined;
+    const token = client.handshake.auth?.token;
+    // Зберігаємо ПРОМІС: перший `join` може прилетіти раніше, ніж завершиться
+    // запит у денилист, і не має отримати «forbidden» через гонку.
+    client.data.user = (
+      typeof token === 'string'
+        ? this.auth.authenticate(token).catch(() => undefined)
+        : Promise.resolve(undefined)
+    ) as Promise<AuthUser | undefined>;
   }
 
   // Клієнт шле id замовлення; кладемо сокет у orders:<id> лише якщо
   // замовлення існує і належить buyerId з підключення — анонімному
   // (buyerId відсутній) або чужому (не збігається) відмовляємо без join.
   @SubscribeMessage('join')
-  join(@ConnectedSocket() client: Socket, @MessageBody() orderId: string): WsResponse<JoinResult> {
+  async join(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() orderId: string,
+  ): Promise<WsResponse<JoinResult>> {
+    const user = await (client.data.user as Promise<AuthUser | undefined>);
     let ownerId: string;
     try {
       ownerId = this.orders.getById(orderId).buyer_id;
@@ -73,8 +86,7 @@ export class OrdersGateway implements OnGatewayConnection, OnModuleInit, OnModul
       return { event: 'joined', data: { ok: false, reason: 'not-found' } };
     }
 
-    const buyerId = client.data.buyerId as string | undefined;
-    if (!buyerId || buyerId !== ownerId) {
+    if (!user || (user.id !== ownerId && user.role !== 'admin')) {
       return { event: 'joined', data: { ok: false, reason: 'forbidden' } };
     }
 

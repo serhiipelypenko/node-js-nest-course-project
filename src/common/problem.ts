@@ -4,6 +4,8 @@ export const PROBLEM_BASE = 'https://api.marketplace.example/problems';
 
 export const PROBLEM_TITLES: Record<number, string> = {
   400: 'Некоректний запит',
+  401: 'Потрібна автентифікація',
+  403: 'Доступ заборонено',
   404: 'Ресурс не знайдено',
   409: 'Конфлікт зі станом ресурсу',
   422: 'Тіло не пройшло перевірку',

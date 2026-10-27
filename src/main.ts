@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { join } from 'node:path';
 import { ConfigService } from '@nestjs/config';
-import { INestApplication, NestApplicationOptions } from '@nestjs/common';
+import { INestApplication, LogLevel, NestApplicationOptions } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import * as express from 'express';
 import * as OpenApiValidator from 'express-openapi-validator';
@@ -35,6 +35,9 @@ export function configureApp(app: INestApplication): INestApplication {
       validateRequests: true,
       validateResponses: true,
       ignoreUndocumented: true,
+      // Безпеку (підпис, exp, денилист, 401/403) рішає Nest-гард з problem+json,
+      // а не валідатор: він би відповів власним 401 за гард.
+      validateSecurity: false,
     }),
   );
   app.use(openApiErrorHandler);
@@ -46,9 +49,11 @@ export function configureApp(app: INestApplication): INestApplication {
   return app;
 }
 
-export async function createApp(): Promise<INestApplication> {
+export async function createApp(
+  logger: LogLevel[] = ['error', 'warn', 'log'],
+): Promise<INestApplication> {
   const app = await NestFactory.create(AppModule, {
-    logger: ['error', 'warn', 'log'],
+    logger,
     ...APP_OPTIONS,
   });
   return configureApp(app);

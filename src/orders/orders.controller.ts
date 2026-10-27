@@ -1,9 +1,12 @@
 import { Body, Controller, DefaultValuePipe, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import type { AuthUser } from '../auth/auth.types';
+import { CurrentUser, Roles } from '../auth/decorators';
 import { filter } from 'rxjs';
 import { OrderEventsService } from './order-events.service';
 import { OrderItem, OrdersService, OrderStatus } from './orders.service';
 
+// buyer_id у тілі (спадок hw-18) ІГНОРУЄТЬСЯ: власник — це sub токена.
 interface CreateOrderBody {
   items: OrderItem[];
   buyer_id?: string;
@@ -25,15 +28,16 @@ export class OrdersController {
 
   @Get()
   list(
+    @CurrentUser() user: AuthUser,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
     @Query('cursor') cursor?: string,
   ) {
-    return this.orders.list(limit, cursor);
+    return this.orders.listFor(user, limit, cursor);
   }
 
   @Get(':id')
-  getOne(@Param('id') id: string) {
-    return this.orders.getById(id);
+  getOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.orders.getOwned(id, user);
   }
 
   // Заголовок Idempotency-Key і форма тіла (items, мінімум 1) вимагаються
@@ -41,12 +45,18 @@ export class OrdersController {
   // немає жодного ручного `if` на цей рахунок.
   @Post()
   @HttpCode(201)
-  create(@Body() body: CreateOrderBody, @Res({ passthrough: true }) res: Response) {
-    const order = this.orders.create(body.items, body.buyer_id);
+  create(
+    @Body() body: CreateOrderBody,
+    @CurrentUser() user: AuthUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const order = this.orders.create(body.items, user.id);
     res.setHeader('Location', `/orders/${order.id}`);
     return order;
   }
 
+  // Рівень РОЛІ: статус веде продавець/адмін, покупець його не переписує.
+  @Roles('seller', 'admin')
   @Patch(':id/status')
   updateStatus(@Param('id') id: string, @Body() body: UpdateOrderStatusBody) {
     return this.orders.updateStatus(id, body.status);
@@ -57,11 +67,16 @@ export class OrdersController {
   // тіло цієї відповіді — нескінченний text/event-stream, а не JSON, який
   // можна звірити зі схемою.
   @Get(':id/events')
-  events(@Param('id') id: string, @Req() req: Request, @Res() res: Response): void {
+  events(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): void {
     // Існування замовлення перевіряємо ДО writeHead: NotFoundException звідси
     // ще встигає піти тим самим шляхом, що getOne (ProblemJsonFilter) —
     // після writeHead кидати виняток запізно, заголовки вже пішли.
-    this.orders.getById(id);
+    this.orders.getOwned(id, user);
 
     const lastEventId = Number(req.headers['last-event-id'] ?? 0);
 
