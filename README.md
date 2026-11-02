@@ -53,6 +53,12 @@
   власність); три демо `demo:auth` / `demo:reuse` / `demo:rbac` (див. розділ
   [Auth](#auth)).
 
+- **hw-26** — файли: двокроковий контракт завантаження (`intent` → PUT за presigned
+  URL **повз наш сервіс** → `commit` з HeadObject), multipart із **відновленням**
+  (ListParts), закрите сховище за кеш-шаром і ассети з хешем в імені (оновлення
+  без інвалідації); три демо `demo:upload` / `demo:multipart` / `demo:cdn` (див.
+  розділ [Files](#files)).
+
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
@@ -1295,6 +1301,207 @@ JWKS/OIDC (лекція 25). Замовлення й товари HTTP-шару,
 (власність перевіряється на них; wiring у Postgres — окремий крок). Для
 HTTP-шару Redis не потрібен: денилист у Postgres.
 
+## Files
+
+Фото товарів, аватарки, дампи з ДЗ #15. «Покласти в теку на сервері» ламається на
+першому ж горизонтальному масштабуванні, тож шлях файла будується з трьох частин, і на
+кожній свідомо вибрано, чим платимо. Три механізми — це три застосування одного прийому:
+**коли скасувати дію дорого або неможливо, зроби так, щоб скасування було не потрібне.**
+Presigned не відкликати → робимо його коротким. Запис у CDN не дістати → робимо URL
+версійним. Обрив не попередити → робимо завантаження відновлюваним.
+
+```
+POST /uploads/intent ─► рядок files(PENDING) + presigned PUT   (гард ДЗ #24, ключ генерує сервер)
+клієнт ──PUT байти──► сховище                                   (наш API не в шляху даних)
+POST /uploads/commit ─► HeadObject (є? розмір?) ─► COMPLETED
+GET  /files/:id      ─► 302 на presigned GET на 60 с            (гард на кожен запит)
+публічні ассети      ─► edge (кеш) ─► сховище                   (сховище закрите для публіки)
+```
+
+### Змінні (джерело — сховище з hw-11)
+
+Нових `.env`-файлів немає: значення приходять через `bash scripts/with-secrets.sh dev …`
+(Infisical) або, для грейдера, з оточення при `SKIP_VAULT=1`. Усі — в `src/config/env.schema.ts`
+і `.env.example`; секрети **без дефолтів** (дефолт ключа = ключ, зашитий у код).
+
+| Змінна | Що це | Джерело | Секрет? |
+|---|---|---|---|
+| `STORAGE_ENDPOINT` | адреса S3-API; **порожньо = справжній AWS S3** | сховище секретів / `export` | ні |
+| `STORAGE_REGION` | регіон підпису (`us-east-1`) | дефолт у схемі | ні |
+| `STORAGE_ACCESS_KEY` | ключ доступу = право писати й читати ВСІ файли | сховище секретів / `export` | **так** |
+| `STORAGE_SECRET_KEY` | секрет до нього | сховище секретів / `export` | **так** |
+| `STORAGE_BUCKET` | імʼя приватного бакета | сховище секретів / `export` | ні |
+| `STORAGE_PUT_EXPIRES_SEC` | строк presigned PUT, 300 | дефолт у схемі | ні |
+| `STORAGE_PART_EXPIRES_SEC` | строк presigned URL частини multipart, 900 | дефолт у схемі | ні |
+| `STORAGE_GET_EXPIRES_SEC` | строк presigned GET після `/files/:id`, 60 | дефолт у схемі | ні |
+| `STORAGE_MULTIPART_THRESHOLD` | поріг multipart, байт (8 МіБ) | дефолт у схемі | ні |
+
+Ціна витоку інша, ніж у `DATABASE_URL`: ключ доступу до сховища — це доступ до всіх
+файлів усіх користувачів. Якби ж ми взяли справжній CloudFront із підписаними URL —
+приватний ключ підпису давав би право видавати доступ до всього приватного контенту
+дистрибуції; ми його не заводимо (див. «Чого немає»).
+
+Клієнт сховища (`src/storage/s3.ts`) працює з будь-яким S3-сумісним: `forcePathStyle` —
+лише коли заданий endpoint, а **`requestChecksumCalculation: 'WHEN_REQUIRED'`** обов'язковий:
+presigned підписується, коли тіла ще немає, і дефолт SDK кладе в query суму порожніх
+даних (`x-amz-checksum-crc32=AAAAAA==`), якої справжнє тіло не пройде.
+
+### Сховище в compose: RustFS, не MinIO
+
+Лекційний стенд — MinIO, але образи `minio/minio` і `minio/mc` **видалено з Docker Hub**
+(закріплений тег більше не тягнеться на чистій машині, а грейдер клонує начисто). Тому
+сервіс `storage` у `docker-compose.yml` — `rustfs/rustfs:1.0.4` (S3-API, multipart,
+presigned). Порт API — **22650**, дані — у `tmpfs` розміром **1g** (на 256m контейнер
+помирає посеред серії), `mode=1777` потрібен, бо процес у контейнері не root. Dev-креденшели
+`hw26user`/`hw26secretpass` — у compose, у git, як `marketplace` у `db`. Бакет приватний;
+його (і lifecycle-правило) створює демо (`ensureBucket`), якщо його немає. API той самий,
+тож для справжнього S3 міняється лише endpoint (порожній) і значення змінних.
+
+### Контракт завантаження
+
+- **intent** (`POST /uploads/intent`, `{filename, contentType, size}`) → 200. Гард ДЗ #24
+  (закрито за замовчуванням, `@Roles('customer','seller','admin')`). `contentType` — з
+  **allowlist** (`src/files/files.types.ts`): jpeg/png/webp/pdf/octet-stream. Ключ збирає
+  сервер: `uploads/{userId}/{uuid}.{ext}`, розширення — з allowlist, **filename у ключ не
+  потрапляє** (демо шле `../../etc/passwd` і перевіряє це). У БД зʼявляється рядок
+  `PENDING` (міграція `Files`). Заголовок `Idempotency-Key` (ДЗ #22): подвійний тап по кнопці
+  повертає той самий файл, а не другий обʼєкт (`UNIQUE (owner_id, idempotency_key)`).
+- **commit** (`POST /uploads/commit`, `{id}`) → `HeadObject`: обʼєкта немає → **409**
+  `object-missing`; розмір не збігається з очікуваним → 409 `size-mismatch`; тільки після
+  цього `COMPLETED`. Повторний commit ідемпотентний. Без цього кроку клієнт «комітить»
+  те, чого не заливав, а база не знає про обʼєкти — «файли-сироти».
+- **`GET /files/:id` → 302** на presigned GET на 60 с. Presigned не відкликається (у нього
+  немає `jti`), тому в листи й сторінки кладемо цей ендпоінт, а не URL: гард працює на
+  кожен запит, а наш сервіс — у шляху авторизації, але не в шляху даних.
+- Власність файла перевіряє сервіс (`owned`, як `getOwned` у замовленнях): чужий → 403.
+- Список файлів живе в **БД** (`IDX_files_owner_created`), не в листингу сховища:
+  `ListObjectsV2` платний, повільний (1 000 ключів за виклик) і не знає власника.
+- Presigned URL **не логуємо** — він і є носій доступу; у лог іде `file=<id> key=<ключ>`.
+- Ці маршрути поза `openapi/openapi.yaml` (як `/auth/*` частково): валідатор з
+  `ignoreUndocumented` їх пропускає, тіло intent валідує zod у сервісі. `check:spec` не чіпано.
+
+### Строк presigned — свідоме число
+
+| Що | Строк | Чому |
+|---|---|---|
+| PUT одного файла (≤ 8 МіБ) | **300 с** | Клієнт отримує URL і одразу заливає: аватарка з форми — секунди, на поганому мобільному каналі — хвилини. 5 хв з запасом на повільну мережу, і ніхто не зможе «знайти» URL у вчорашньому логу. Не пережив — просимо новий intent (дешево). |
+| PUT частини multipart | **900 с** | Частина — ≥ 5 МіБ; 15 хв на слабкому каналі вистачає, а при обриві URL все одно видаємо заново через `GET /uploads/:id/parts`. |
+| GET після `/files/:id` | **60 с** | Браузер йде за 302 негайно. Хвилина — і посилання, скопійоване в чат, мертве. |
+
+Технічна межа SigV4 — 7 діб, але в проді підписують ролью (STS, типово 1 година), і presigned
+помирає разом із креденшелами, якими підписаний: «семи днів» там не існує. «Строк
+минув → той самий URL дає 403» перевіряє `demo:upload` (`expired=403`; там URL
+підписано на 1 с тим самим кодом `StorageService.presignPut`, щоб не чекати 5 хв).
+
+### Multipart: поріг і розмір частини — пораховані
+
+Multipart — це **протокол відновлення**, а не «підтримка великих файлів»: стан завантаження
+лежить у сховищі, а не в клієнті. Документація S3 перелічує чотири переваги, і про розмір
+файла — лише одна; три інші — про обрив, відновлення й невідомий розмір. Простий PUT на обриві
+втрачає ВСЕ.
+
+- **Поріг 8 МіБ** (`STORAGE_MULTIPART_THRESHOLD`): вище — intent робить `CreateMultipartUpload`.
+  Це найменше значення, при якому файл дає ≥ 2 частин по мінімальних 5 МіБ, тобто є що
+  відновлювати; нижче multipart лише додає запитів (Create + Part × N + Complete).
+- **Розмір частини — формула, не константа** (`src/storage/limits.ts`): частин максимум
+  10 000, тож `partSize = max(5 МіБ, ceil(size / 10 000))`, округлено вгору до МіБ.
+  Жорсткі 5 МіБ падають на файлі понад ~48,8 ГіБ. Мінімум 5 МіБ діє на всі частини, крім
+  останньої (інакше `EntityTooSmall` на Complete). Для 11 МіБ → 5 + 5 + 1.
+- **Відновлення**: `GET /uploads/:id/parts` → сервер робить `ListParts` (з пагінацією по
+  1000) і віддає `uploaded` та `missing` зі свіжими presigned URL лише на бракуюче.
+  Частина, чий розмір не збігся з очікуваним, вважається відсутньою.
+- До `CompleteMultipartUpload` обʼєкта **не існує** (HeadObject → 404), хоча частини лежать.
+  Після — розмір збігається, `ETag` має суфікс `-N` (кількість частин) і **не є MD5 файла**:
+  код «порівняю ETag із локальним MD5» на multipart ламається мовчки.
+- Незавершений multipart тарифікується, хоч обʼєкта немає і в консолі його не видно. Правило
+  lifecycle `AbortIncompleteMultipartUpload` (7 днів) демо ставить на бакет (`ensureBucket`);
+  для AWS — той самий JSON, що нижче. Правило «видаляти все старше 30 днів» такі хвости **не
+  чіпає** — це різні дії.
+
+```json
+{ "Rules": [ { "ID": "abort-incomplete-mpu", "Status": "Enabled", "Filter": { "Prefix": "" },
+               "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 } } ] }
+```
+
+### CDN: обрана форма — локальний edge (OAC-за-суттю)
+
+Обрана **локальна форма**: `src/cdn/edge.ts` (≈40 рядків, `node:http`). Він бере обʼєкт зі
+сховища **своїми креденшелами** (клієнт SDK), кладе в кеш і віддає з власним `X-Cache:
+HIT|MISS`. Це і є суть OAC: до сховища ходить кеш, а не публіка. Бакет **один і приватний**
+(закритий для публіки, відкритий для кеша): анонімний GET прямо в сховище дає 403, а
+через edge — 200. Edge віддає лише префікс `assets/` — приватні `uploads/` через нього не
+прочитати (403). Кешує тільки те, що дозволив origin (`Cache-Control: max-age/s-maxage`,
+не `private`/`no-store`); **без `Cache-Control` на обʼєкті кеш не закешує нічого**
+(cache-hit = 0) — тому заголовок ставиться на обʼєкт при завантаженні
+(`src/cdn/assets.ts`), а не в edge. Запуск окремо: `npm run edge`.
+
+**Оновлення без інвалідації.** Імʼя ассета містить хеш вмісту (`app.15c42ab7.css`:
+sha256 вмісту, 8 hex), заголовок — `public, max-age=31536000, immutable`. «Деплой» із
+новим вмістом дістає нове імʼя → нову кеш-комірку; старий запис нікому не заважає;
+інвалідацій — нуль (`invalidations=0`). Інвалідація платна, нескасовна і не дістає ні до
+браузера, ні до корпоративного проксі; AWS для файлів, що часто оновлюються, рекомендує
+передусім версіонування файлів.
+
+**AWS-варіант (CloudFront + OAC)** — не піднімається без акаунта, тож це конфігурація.
+Bucket policy: Principal — сервіс CloudFront і **обов'язковий** `Condition` з
+`AWS:SourceArn` — без нього доступ дозволено будь-якій дистрибуції у світі. Приватний
+бакет із Block Public Access, без публічної ACL:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+    "Effect": "Allow",
+    "Principal": { "Service": "cloudfront.amazonaws.com" },
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::my-bucket/assets/*",
+    "Condition": { "StringEquals": { "AWS:SourceArn": "arn:aws:cloudfront::111122223333:distribution/E1234567890ABC" } }
+  }]
+}
+```
+
+(`Resource` звужено до `assets/*`: публічний тільки цей префікс, як і в локальному edge.)
+
+### Демо
+
+Усі три йдуть через `bash scripts/with-secrets.sh dev …`, самі приводять стан до чистого
+(усі обʼєкти під префіксом, **усі незавершені multipart**, `TRUNCATE files`), друкують у stdout
+лише `ключ=число`, діагностику — у stderr, і завершуються з кодом ≠ 0 при порушенні інваріанта.
+API піднімається **в тому ж процесі** на ефемерному порту; після зупинки — на **іншому**
+(глобальний fetch тримає пул зʼєднань на парі host:port). Живість порту — сирим сокетом.
+
+| Демо | Доводить | Ключові рядки |
+|---|---|---|
+| `demo:upload` | байти йдуть повз наш сервіс | `api-alive=0` + `put-offline=200` (PUT робить процес з `env: {}`), `key-from-server=1`, `commit-without-bytes=409`, `tampered=403`, `expired=403` |
+| `demo:multipart` | multipart = відновлення | `head-before-complete=404`, `resumed-parts=1`, `etag-multipart=1` |
+| `demo:cdn` | закрите сховище + оновлення без інвалідації | `direct=403`, `cache-hit=1`, `new-name=1`, `content-changed=1` |
+
+**Власні числа трьох прогонів** (RustFS 1.0.4 у compose, `SKIP_VAULT=1`; multipart запущено двічі):
+
+```
+demo:upload      intent=200 key-from-server=1 api-alive=0 put-offline=200 commit=200
+                 commit-without-bytes=409 tampered=403 expired=403
+demo:multipart   head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1   (прогін 1)
+                 head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1   (прогін 2)
+demo:cdn         direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200
+                 content-changed=1 invalidations=0
+```
+
+### Чого немає (чесно)
+
+- **Прибиральник сиріт не написано.** Задум: джоба BullMQ (ДЗ #23), що раз на добу бере
+  `PENDING` старші за добу (частковий індекс `IDX_files_pending`) → `AbortMultipartUpload` →
+  `DeleteObject` → видалити рядок. Не оцінюється, тож лише описано. Захист від multipart-хвостів
+  — lifecycle-правило вище.
+- **Magic bytes** не перевіряються: `Content-Type` від клієнта — його слова. План: на commit
+  `GetObject` з `Range: bytes=0-255` + `file-type`.
+- Розмір примусово на PUT не накладається (лише звіряється на commit); обʼєкт неправильного
+  розміру лишається в сховищі, а файл — `PENDING`.
+- Signed URL / signed cookies CloudFront не робили; для приватного контенту за CDN планом
+  є саме вони (приватний ключ підпису лежав би в сховищі секретів, не в репо).
+- Нативні Nest-контролери products/orders досі in-memory; файли — окремий ресурс.
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -1571,6 +1778,56 @@ awk -F= '/^scheduled-runs=/{ok=($2>=2)} END{exit !ok}' /tmp/q.txt && echo "sched
 # кеш і черга — на різних інстансах
 grep -qx 'cache-lru=1' /tmp/c.txt && grep -qx 'queue-noeviction=1' /tmp/q.txt \
   && echo "два інстанси OK" || echo "кеш і черга на одному інстансі"
+```
+
+### hw-26 (Файли: presigned, multipart, CDN)
+
+Без сховища секретів: `SKIP_VAULT=1`, значення — `export`-ом. Потрібні Postgres (рядки
+`files`, міграція `Files`), сховище-емулятор (сервіс `storage`, порт 22650) і
+одноразова пара ES256 (гард ДЗ #24 стоїть на intent/commit). Піднімаються лише
+`db pgbouncer storage` — контейнер `api` без ключів не стартує, тож `up -d --wait`
+без переліку не годиться.
+
+```bash
+docker compose up -d --wait db pgbouncer storage   # --wait обовʼязковий; storage = S3-емулятор (tmpfs 1g)
+
+export STORAGE_ENDPOINT=http://127.0.0.1:22650
+export STORAGE_ACCESS_KEY=hw26user
+export STORAGE_SECRET_KEY=hw26secretpass
+export STORAGE_BUCKET=hw26-files
+export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_secret_pw DB_NAME=marketplace
+export SKIP_VAULT=1      # у грейдера немає доступу до сховища
+
+# одноразова пара ES256 (EC P-256) для прогону; PEM їде в base64
+node -e 'const {generateKeyPairSync}=require("node:crypto");
+const k=generateKeyPairSync("ec",{namedCurve:"P-256",
+privateKeyEncoding:{type:"pkcs8",format:"pem"},
+publicKeyEncoding:{type:"spki",format:"pem"}});
+const fs=require("node:fs");
+fs.writeFileSync("/tmp/priv.b64",Buffer.from(k.privateKey).toString("base64"));
+fs.writeFileSync("/tmp/pub.b64",Buffer.from(k.publicKey).toString("base64"));'
+export JWT_KID=grader
+export JWT_PRIVATE_KEY="$(cat /tmp/priv.b64)"
+export JWT_PUBLIC_KEY="$(cat /tmp/pub.b64)"
+export REFRESH_TOKEN_PEPPER=grader-pepper
+
+npm ci
+npx tsc --noEmit
+
+npm run demo:upload      # intent=200 key-from-server=1 api-alive=0 put-offline=200 commit=200 commit-without-bytes=409 tampered=403 expired=403
+npm run demo:multipart   # head-before-complete=404 resumed-parts=1 complete=200 size-match=1 etag-multipart=1  (можна двічі)
+npm run demo:cdn         # direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 new-url=200 content-changed=1
+```
+
+Демо самі накочують міграції, створюють бакет (якщо немає), чистять свій стан на старті й
+у кінці — повторний запуск дає ті самі числа. Для справжнього S3: не задавати
+`STORAGE_ENDPOINT`, а `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` / `STORAGE_REGION` /
+`STORAGE_BUCKET` — своїми (бакет приватний; `demo:cdn` перевіряє `direct=403` на
+`https://<bucket>.s3.<region>.amazonaws.com`). Перевірки 2, 6, 7 (статичні):
+
+```bash
+node -e "const s=require('./package.json').scripts;const need=['demo:upload','demo:multipart','demo:cdn'];const bad=need.filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
+grep -q 'SKIP_VAULT' scripts/with-secrets.sh && echo "аварійний вхід є"
 ```
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)

@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність); hw-26 (файли: presigned-завантаження повз API, multipart з відновленням, закритий бакет за кеш-шаром, ассети з хешем в імені)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -41,9 +41,15 @@
     "demo:auth": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-auth.js",
     "demo:reuse": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-reuse.js",
     "demo:rbac": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-rbac.js",
-    "auth:fingerprint": "bash scripts/with-secrets.sh dev node scripts/jwt-fingerprint.mjs"
+    "auth:fingerprint": "bash scripts/with-secrets.sh dev node scripts/jwt-fingerprint.mjs",
+    "demo:upload": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-upload.js",
+    "demo:multipart": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-multipart.js",
+    "demo:cdn": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-cdn.js",
+    "edge": "bash scripts/with-secrets.sh dev node dist/cdn/edge-main.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1161.0",
+    "@aws-sdk/s3-request-presigner": "^3.1161.0",
     "@nestjs/common": "10.4.22",
     "@nestjs/config": "3.3.0",
     "@nestjs/core": "10.4.22",

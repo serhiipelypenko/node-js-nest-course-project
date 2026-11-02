@@ -60,6 +60,22 @@ export const envSchema = z.object({
     z.string().refine(isEcKey('public'), ecMessage('SPKI')).optional(),
   ),
 
+  // ── hw-26: файли (S3-сумісне сховище) ───────────────────────────────
+  // 🔴 Ключ доступу до сховища = право писати й читати ВСІ файли. Як і ключі
+  // JWT — без дефолтів, значення зі сховища секретів (with-secrets.sh) або
+  // SKIP_VAULT=1. Порожній ENDPOINT = справжній AWS S3.
+  STORAGE_ENDPOINT: z.preprocess(blankToUndefined, z.string().url().optional()),
+  STORAGE_REGION: z.string().min(1).default('us-east-1'),
+  STORAGE_ACCESS_KEY: z.string().min(1),
+  STORAGE_SECRET_KEY: z.string().min(1),
+  STORAGE_BUCKET: z.string().min(3),
+  // Строки presigned — свідомі числа (обґрунтування в README, ## Files).
+  STORAGE_PUT_EXPIRES_SEC: z.coerce.number().int().min(10).max(3600).default(300),
+  STORAGE_PART_EXPIRES_SEC: z.coerce.number().int().min(10).max(3600).default(900),
+  STORAGE_GET_EXPIRES_SEC: z.coerce.number().int().min(5).max(3600).default(60),
+  // Вище цього розміру intent відкриває multipart (8 МіБ).
+  STORAGE_MULTIPART_THRESHOLD: z.coerce.number().int().min(5242880).default(8388608),
+
   // Не секрети — дефолти допустимі. Орієнтир завдання: access 5–15 хв.
   ACCESS_TOKEN_TTL_SEC: z.coerce.number().int().min(30).max(3600).default(600),
   REFRESH_TOKEN_TTL_SEC: z.coerce.number().int().min(60).default(604800),

@@ -63,6 +63,12 @@ services:
       REFRESH_TOKEN_PEPPER: ${REFRESH_TOKEN_PEPPER:-}
       JWT_PREVIOUS_KID: ${JWT_PREVIOUS_KID:-}
       JWT_PREVIOUS_PUBLIC_KEY: ${JWT_PREVIOUS_PUBLIC_KEY:-}
+      # hw-26: доступ до сховища файлів — теж зі СХОВИЩА секретів (with-secrets.sh);
+      # у git лише dev-креденшели MinIO нижче, не ці змінні
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
     volumes:
       # той самий файл, що переписує rotate.sh; :ro — контейнер його лише читає
       - ./secrets/db_password:/run/secrets/db_password:ro
@@ -166,6 +172,30 @@ services:
       # ВАЖЛИВО 127.0.0.1, не localhost: у контейнері localhost -> ::1, а puma слухає лише IPv4
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9292/diagnostic/status/heartbeat"]
       interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # hw-26: S3-сумісне сховище (ЕМУЛЯТОР, не AWS). RustFS, а не MinIO: образи
+  # minio/minio і minio/mc видалено з Docker Hub (і з Quay) — на чистій машині
+  # (грейдер!) закріплений тег уже не тягнеться. Тег закріплено. API — 22650.
+  # Дані в tmpfs: кожен `down` лишає чистий аркуш. 🔴 size=1g: на 256m
+  # контейнер помирає посеред серії демо (tmpfs — це РАМ, тож стеля явна).
+  # Бакет приватний (анонімний GET = 403); створює його демо (ensureBucket).
+  # Root-креденшели — dev-стенд, навмисно в git, як `marketplace` у db.
+  storage:
+    image: rustfs/rustfs:1.0.4
+    environment:
+      RUSTFS_ACCESS_KEY: hw26user
+      RUSTFS_SECRET_KEY: hw26secretpass
+      RUSTFS_VOLUMES: /data
+    tmpfs:
+      - /data:size=1g,mode=1777
+    ports:
+      - "22650:9000" # S3 API
+      - "22651:9001" # веб-консоль
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://127.0.0.1:9000/ || exit 1"]
+      interval: 2s
       timeout: 3s
       retries: 30
 
