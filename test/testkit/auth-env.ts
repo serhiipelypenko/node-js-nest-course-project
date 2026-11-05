@@ -16,4 +16,8 @@ export function setAuthEnv(): void {
   process.env.JWT_PUBLIC_KEY = Buffer.from(publicKey).toString('base64');
   process.env.JWT_KID = 'test';
   process.env.REFRESH_TOKEN_PEPPER = 'test-pepper';
+  // hw-26: сховище файлів теж обовʼязкове в схемі; тести його не чіпають (фейкові значення)
+  process.env.STORAGE_ACCESS_KEY ??= 'test';
+  process.env.STORAGE_SECRET_KEY ??= 'test-secret';
+  process.env.STORAGE_BUCKET ??= 'test-bucket';
 }
