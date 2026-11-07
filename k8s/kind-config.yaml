@@ -1,0 +1,10 @@
+# hw-28: одновузловий kind. NodePort 30828 -> 22880 на хості (проброс портів kind).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: hw28
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30828
+        hostPort: 22880
+        protocol: TCP

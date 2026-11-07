@@ -1,0 +1,15 @@
+{
+  "name": "marketplace-k8s-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "hw-28: сервіс курсового для Kubernetes — /healthz, /readyz, прогрів до listen(), дренаж на SIGTERM. Без runtime-залежностей.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.3"
+  }
+}

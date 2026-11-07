@@ -59,6 +59,12 @@
   без інвалідації); три демо `demo:upload` / `demo:multipart` / `demo:cdn` (див.
   розділ [Files](#files)).
 
+- **hw-28** — образ і кластер: мультистейдж-Dockerfile з distroless-фіналом і BuildKit-секретом,
+  сканування з обчислюваним порогом, kind-кластер, уся інфраструктура — типізованою Pulumi-програмою
+  (Namespace, Secret, Deployment, Service, PDB, HPA), rolling update під навантаженням з
+  `failed=0`; три демо `demo:image` / `demo:rollout` / `demo:pdb` (див. розділ
+  [Kubernetes (hw-28)](#kubernetes-hw-28)).
+
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
@@ -135,7 +141,7 @@ npm start                                         # = npm run build && node dist
 |--------------------|--------------------------------------|-------------|---------------------------|------------------|-------------|
 | `NODE_ENV`         | `development \| production \| test`  | ні          | `development`             | `.env` / оточення процесу | режим роботи |
 | `PORT`             | ціле 1–65535                         | ні          | `3000`                    | `.env` / оточення процесу | порт HTTP-сервера |
-| `DB_URL`           | URL `postgres://user@host:port/db`   | **так**     | —                         | **сховище конфігурації (hw-11)** — оточення `dev` і `prod`; у git лише фейковий рядок у `.env.example` | DSN Postgres до бази hw-12 **без пароля** |
+| `DB_URL`           | URL `postgres://user@host:port/db`   | **так**     | —                         | **vault конфігурації (hw-11)** — оточення `dev` і `prod`; у git лише фейковий рядок у `.env.example` | DSN Postgres до бази hw-12 **без пароля** |
 | `DB_PASSWORD_FILE` | шлях до файла                        | ні          | `./secrets/db_password`   | `.env` / оточення процесу (сам пароль — у файлі-секреті, не в git) | файл із паролем ролі БД |
 
 `DB_URL` — це та сама змінна з hw-11; для hw-12 змінилося лише **значення**:
@@ -1111,10 +1117,10 @@ completed=1`; після завершення третій `add` теж не с�
 
 | Змінна | Джерело | Навіщо |
 |---|---|---|
-| `JWT_PRIVATE_KEY` | сховище (#11) | підпис access-токенів; base64 від PEM PKCS#8 (EC P-256) |
-| `JWT_PUBLIC_KEY` | сховище (#11) | перевірка підпису; base64 від PEM SPKI |
-| `JWT_KID` | сховище (#11) | ідентифікатор поточного ключа в заголовку токена |
-| `REFRESH_TOKEN_PEPPER` | сховище (#11) | «перець» для HMAC refresh-токенів у БД |
+| `JWT_PRIVATE_KEY` | vault (#11) | підпис access-токенів; base64 від PEM PKCS#8 (EC P-256) |
+| `JWT_PUBLIC_KEY` | vault (#11) | перевірка підпису; base64 від PEM SPKI |
+| `JWT_KID` | vault (#11) | ідентифікатор поточного ключа в заголовку токена |
+| `REFRESH_TOKEN_PEPPER` | vault (#11) | «перець» для HMAC refresh-токенів у БД |
 | `JWT_PREVIOUS_KID`, `JWT_PREVIOUS_PUBLIC_KEY` | необовʼязкові, лише на час ротації ключа | попередній публічний ключ (overlap) |
 | `ACCESS_TOKEN_TTL_SEC`, `REFRESH_TOKEN_TTL_SEC` | оточення, дефолти 600 / 604800 (не секрети) | життя токенів |
 | `DB_URL`, `DB_PASSWORD_FILE` | compose / оточення | дев-креденшели HTTP-сервера, секретом не є |
@@ -1326,11 +1332,11 @@ GET  /files/:id      ─► 302 на presigned GET на 60 с            (гар
 
 | Змінна | Що це | Джерело | Секрет? |
 |---|---|---|---|
-| `STORAGE_ENDPOINT` | адреса S3-API; **порожньо = справжній AWS S3** | сховище секретів / `export` | ні |
+| `STORAGE_ENDPOINT` | адреса S3-API; **порожньо = справжній AWS S3** | vault секретів / `export` | ні |
 | `STORAGE_REGION` | регіон підпису (`us-east-1`) | дефолт у схемі | ні |
-| `STORAGE_ACCESS_KEY` | ключ доступу = право писати й читати ВСІ файли | сховище секретів / `export` | **так** |
-| `STORAGE_SECRET_KEY` | секрет до нього | сховище секретів / `export` | **так** |
-| `STORAGE_BUCKET` | імʼя приватного бакета | сховище секретів / `export` | ні |
+| `STORAGE_ACCESS_KEY` | ключ доступу = право писати й читати ВСІ файли | vault секретів / `export` | **так** |
+| `STORAGE_SECRET_KEY` | секрет до нього | vault секретів / `export` | **так** |
+| `STORAGE_BUCKET` | імʼя приватного бакета | vault секретів / `export` | ні |
 | `STORAGE_PUT_EXPIRES_SEC` | строк presigned PUT, 300 | дефолт у схемі | ні |
 | `STORAGE_PART_EXPIRES_SEC` | строк presigned URL частини multipart, 900 | дефолт у схемі | ні |
 | `STORAGE_GET_EXPIRES_SEC` | строк presigned GET після `/files/:id`, 60 | дефолт у схемі | ні |
@@ -1475,7 +1481,7 @@ API піднімається **в тому ж процесі** на ефемер
 |---|---|---|
 | `demo:upload` | байти йдуть повз наш сервіс | `api-alive=0` + `put-offline=200` (PUT робить процес з `env: {}`), `key-from-server=1`, `commit-without-bytes=409`, `tampered=403`, `expired=403` |
 | `demo:multipart` | multipart = відновлення | `head-before-complete=404`, `resumed-parts=1`, `etag-multipart=1` |
-| `demo:cdn` | закрите сховище + оновлення без інвалідації | `direct=403`, `cache-hit=1`, `new-name=1`, `content-changed=1` |
+| `demo:cdn` | закритий бакет + оновлення без інвалідації | `direct=403`, `cache-hit=1`, `new-name=1`, `content-changed=1` |
 
 **Власні числа трьох прогонів** (RustFS 1.0.4 у compose, `SKIP_VAULT=1`; multipart запущено двічі):
 
@@ -1501,6 +1507,141 @@ demo:cdn         direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new-name=1 ne
 - Signed URL / signed cookies CloudFront не робили; для приватного контенту за CDN планом
   є саме вони (приватний ключ підпису лежав би в сховищі секретів, не в репо).
 - Нативні Nest-контролери products/orders досі in-memory; файли — окремий ресурс.
+
+## Kubernetes (hw-28)
+
+Питання цього ДЗ — не «чи запуститься образ», а «чи переживе він оновлення під навантаженням».
+Відповідь — числом: `failed=0` із лічильника, який рахує коди відповідей із файла.
+
+**Що саме їде в кластер.** Нестівський моноліт (`src/`) тягне Postgres, Redis, RabbitMQ, S3 і ключі
+JWT — в одновузловий kind усе це не влізе. Тому в кластер їде `service/` — мінімальний сервіс
+курсового на `node:http` без runtime-залежностей з тим, що перевіряють критерії: `/healthz`
+(живий), `/readyz` (готовий), прогрів **4 с до `listen()`** (імітація міграцій і пулу БД), а на
+`SIGTERM` — спершу `ready=false`, дренаж 5 с і лише потім `server.close()`.
+
+```
+docker/Dockerfile   мультистейдж: build (node:22-slim) -> distroless nodejs22 :nonroot, USER 65532
+infra/              Pulumi (TypeScript): Namespace, Secret, Deployment, Service, PDB, HPA
+k8s/kind-config.yaml  одновузловий kind, NodePort 30828 -> localhost:22880
+scripts/            image-build.sh, cluster-up/down.sh, pulumi.sh, load.sh, scan.mjs
+demo/               image.mjs, rollout.mjs, pdb.mjs
+.github/workflows/image-scan.yml   крок CI: той самий scan з робочим порогом
+```
+
+### На чому піднімав і скільки памʼяті
+
+kind v0.33.0 (Kubernetes v1.37.0), один вузол, Docker Desktop з **7,65 ГіБ**. Контейнер
+`hw28-control-plane` займає ≈ **870 МіБ** (разом із 3 подами сервісу, замір `docker stats`).
+kind обрано за вимірами лекції: на машині з ≈ 3,8 ГіБ він виграв за памʼяттю й часом старту, а
+minikube відмовляється стартувати з `--memory` менше за 1800 МБ. Один кластер за раз.
+Старт `kind create` — ≈ 25 с (образ вузла вже завантажений).
+
+### Змінні
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `APP_DB_PASSWORD` | сховище (#11) | пароль до БД; програма кладе його в K8s Secret, Deployment бере його через `secretKeyRef` |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11) | ключ шифрування стану Pulumi |
+
+Інші змінні — не зі сховища: `PULUMI_BACKEND_URL` (за замовчуванням `file://<repo>/.pulumi`),
+`SCAN_MAX` / `SCAN_SEVERITY` / `SCAN_IMAGE` (параметри сканера), `.npm_token` — **файл**
+із секретом етапу збірки (у git його немає). Нового `.env` немає: значення приходять через
+`scripts/with-secrets.sh` (`SKIP_VAULT=1` — з оточення). Без `APP_DB_PASSWORD` розгортання падає
+**першою дією програми** й називає змінну; дефолту в коді немає.
+
+### Образ (`npm run demo:image`)
+
+* **Мультистейдж, фінал без shell.** `gcr.io/distroless/nodejs22-debian12:nonroot`, `USER 65532:65532`
+  числом (🔴 `runAsNonRoot` + імʼя `nonroot` = `CreateContainerConfigError`: kubelet не резолвить імена).
+  Мета distroless — не розмір (образ ≈ 148 МБ), а відсутність `sh` після RCE. `shell-inside`
+  міряється запуском `docker run --entrypoint sh`, а не читанням Dockerfile.
+* **Секрет збірки — `RUN --mount=type=secret`.** `ARG` осів би в `docker history`, `COPY` + `rm` — у байтах
+  шару. Демо збирає образ із випадковим токеном-приманкою й шукає його у **трьох** місцях:
+  `docker history`, `docker image inspect`, розпакований `docker save` (шар за шаром).
+* **Контроль детекторів.** Нуль нічого не означає, якщо детектор сліпий, тому демо збирає ще два
+  навмисно брудні образи (`docker/selftest/`) і вимагає, щоб детектор їх бачив:
+  `selftest-arg-history=2`, `selftest-copy-layers=1`, `selftest-copy-history=0`.
+
+```
+stages=2  shell-inside=0  runtime-uid=65532
+token-in-history=0  token-in-config=0  token-in-layers=0   detectors-work=1
+```
+
+### Сканування (`npm run scan`)
+
+`scripts/scan.mjs` бере JSON-звіт trivy (локальний `trivy` або `aquasec/trivy:0.74.0` у контейнері),
+**рахує** знахідки потрібної серйозності (за замовчуванням виправні CRITICAL+HIGH) і порівнює з `SCAN_MAX`:
+
+```
+SCAN_MAX=-1    npm run scan   # found=7 max-allowed=-1    gate=fail  exit 1
+SCAN_MAX=99999 npm run scan   # found=7 max-allowed=99999 gate=pass  exit 0
+```
+
+Вимоги «образ має бути зеленим» нема: навіть distroless дає виправні знахідки, а база сканера оновлюється
+щодоби. Робочий поріг CI — `SCAN_MAX=10` (виміряно 7), крок — `.github/workflows/image-scan.yml`.
+
+### Pulumi-програма (`infra/`)
+
+* Типізована (`cd infra && npm ci && npx tsc --noEmit`). Умовні `...spread` для проб **не використані**:
+  `readinessProbe: hardened ? {…} : undefined` — типи ловлять одруківку, а наявність проб у кластері
+  окремо перевіряється читанням Deployment (критерій 7).
+* Профіль `good` (за замовчуванням) і навмисно зламаний `bad` (конфіг стеку `profile`): `bad` — без проб, без
+  SIGTERM-обробника, `maxUnavailable: 1`. Зміна конфігу `rev` міняє pod-шаблон і запускає викочування.
+* **Secret через `data` (base64), не `stringData`**: `stringData` — поле лише для запису, провайдер бачив би
+  різницю на кожному `up`. Повторний `pulumi up` → `8 unchanged`.
+* **Не робіть `pulumi refresh` на цьому стеку** — він зʼїдає K8s Secret зі стану, а наступний `up` падає з
+  `already exists` (лікується `kubectl delete secret` + `up`).
+* `Pulumi.dev.yaml` не в git (там `encryptionsalt`, привʼязаний до passphrase); приклад — `Pulumi.dev.yaml.example`.
+
+Налаштування, що дають нуль втрат: `maxUnavailable: 0` + `maxSurge: 1`; `terminationGracePeriodSeconds: 20` > дренаж
+5 с; `readinessProbe` `/readyz` з `periodSeconds: 1`; `livenessProbe` — **інший** шлях `/healthz`
+(liveness на `/readyz` перетворює «тимчасово не готовий» на нескінченні рестарти); бонусом `startupProbe`
+(`/healthz`, до 30 с) замість великого `initialDelaySeconds` у liveness: поки вона не зелена, liveness і readiness
+мовчать, а після першого успіху startup вимикається назавжди. Порядок у SIGTERM-обробнику — не косметика:
+`close()` одразу відмовляв би новим зʼєднанням, поки балансувальник ще шле трафік.
+
+### Rolling update під навантаженням (`npm run demo:rollout`)
+
+`scripts/load.sh` пише в тимчасовий файл код кожної відповіді (curl-код `000` = відповіді не було), демо рахує
+`requests` / `ok` / `failed` з цього файла, а поки йде навантаження — міняє `rev` і робить `pulumi up`.
+У NodePort напряму збій виглядає як `000`, а не 5xx (за Ingress/ALB стало б 502/503), тому рахується все «не 200».
+Після демо файл знесено, кластер лишається в профілі `good`. `npm run demo:rollout:compare` проганяє ще й `bad`.
+
+| Профіль | Запитів | Не 200 | Частка | Викочування |
+|---|---|---|---|---|
+| `bad` (без проб, без SIGTERM, `maxUnavailable: 1`) | 9158 | 2290 | ≈ кожен четвертий | 3,0 с |
+| `good` | 9404 | **0** | 0 | 18,1 с |
+
+Три прогони `good` поспіль (9404 / 9369 / 9314 запитів) дали `failed=0`. Частка збоїв на `bad` плаває між прогонами;
+викочування `good` довше за `bad` — це ціна нуля: `maxUnavailable: 0` не знімає старий под, поки новий не сказав «готовий»,
+а дренаж додає час на кожен под.
+
+### PDB (`npm run demo:pdb`)
+
+`minAvailable = replicas − 1` (2 з 3): `disruptionsAllowed` = 1 до демо. Демо виселяє двох подів **через Eviction API**
+(`kubectl proxy` + `curl`, число — справжній HTTP-код): `evict-1=201`, `evict-2=429`, а потім чекає, поки заміна
+стане готовою. 🔴 `minAvailable == replicas` дав би `disruptionsAllowed=0` і блокував би будь-який drain; одна репліка + PDB —
+самообман. Звичайне `kubectl delete pod` PDB не зупиняє: бюджет діє лише на Eviction API.
+
+### replicas проти HPA
+
+Програма оголошує `spec.replicas: 3` **і** HPA `autoscaling/v2` (CPU 70 %, 2–5 реплік). У kind немає metrics-server,
+тому HPA показує `cpu: <unknown>/70%` й нічого не масштабує — це очікувано. У бойовому кластері з metrics-server це
+**конфлікт володіння полем**: у `spec.replicas` пишуть і Pulumi (кожен `up` повертає 3), і HPA (масштабує за навантаженням) —
+після кожного деплою кількість реплік стрибатиме назад, а server-side apply покаже конфлікт менеджерів. Лікується або
+прибиранням `replicas` із програми, або `ignoreChanges: ["spec.replicas"]`; тут поле лишене свідомо — за умовою ДЗ.
+
+### Секрет рантайму, ESO та CSI
+
+Значення `APP_DB_PASSWORD` приїжджає зі сховища через `scripts/with-secrets.sh` в оточення Pulumi-програми, вона
+створює K8s Secret, а Deployment має лише `secretKeyRef`: у маніфесті Deployment значення немає
+(`kubectl get deploy -o json | grep -F "$APP_DB_PASSWORD"` → 0). Секрет збірки (BuildKit) живе під час `docker build`
+і захищає образ; Secret рантайму живе в кластері й захищає репозиторій — обидва потрібні, жоден не замінює іншого.
+⚠ base64 — це не шифрування: у локальному кластері значення лежить у etcd відкритим текстом
+(`encryption-provider-config` за замовчуванням не налаштований), «поклав у Secret» = «прибрав із git».
+Промислові шляхи: **External Secrets Operator** (оператор синхронізує секрет зі сховища в K8s Secret за маніфестом
+`ExternalSecret`) або **Secrets Store CSI Driver** (секрет монтується в под як файл і може взагалі не потрапляти в etcd);
+в кластер я їх не ставив — лише описав.
 
 ## Grading
 
@@ -1829,6 +1970,37 @@ npm run demo:cdn         # direct=403 edge-miss=200 edge-hit=200 cache-hit=1 new
 node -e "const s=require('./package.json').scripts;const need=['demo:upload','demo:multipart','demo:cdn'];const bad=need.filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
 grep -q 'SKIP_VAULT' scripts/with-secrets.sh && echo "аварійний вхід є"
 ```
+
+### hw-28 (Docker advanced + Kubernetes через Pulumi)
+
+Хмарного акаунта не треба: усе на локальному kind. Сховища у грейдера нема — `SKIP_VAULT=1`, значення через `export`
+(змінні — з таблиці розділу [Kubernetes (hw-28)](#kubernetes-hw-28)). Потрібні `docker`, `kind`, `kubectl`, `pulumi`.
+
+```bash
+export SKIP_VAULT=1            # у грейдера немає доступу до сховища
+export APP_DB_PASSWORD=grader-secret
+export PULUMI_BACKEND_URL="file://$PWD/.pulumi"
+export PULUMI_CONFIG_PASSPHRASE=hw28-grading
+
+npm --prefix infra ci
+printf 'dummy-npm-token' > .npm_token   # секрет етапу збірки; у git його немає
+
+npm run image:build            # docker/Dockerfile -> marketplace-api:hw28
+npm run cluster:up             # kind create + kind load (образ без load = ErrImagePull)
+npm run up                     # pulumi up
+
+npm run demo:image             # stages, shell-inside, runtime-uid, token-in-*
+SCAN_MAX=-1    npm run scan    # gate=fail, exit != 0
+SCAN_MAX=99999 npm run scan    # gate=pass, exit 0
+npm run demo:rollout           # requests >= 5000, failed=0
+kubectl -n marketplace get pdb marketplace-api -o jsonpath='{.status.disruptionsAllowed}{"\n"}'   # >= 1 ДО demo:pdb
+npm run demo:pdb               # evict-1=201, evict-2=429
+
+npm run destroy && npm run cluster:down   # прибрати після перевірки
+```
+
+Namespace `marketplace`, Deployment / Service / PDB / HPA — `marketplace-api`. Порядок `demo:pdb` після перевірки
+`disruptionsAllowed` обовʼязковий: демо витрачає бюджет.
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 

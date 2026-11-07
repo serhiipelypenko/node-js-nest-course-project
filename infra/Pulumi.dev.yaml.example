@@ -1,0 +1,9 @@
+# Приклад конфігу стеку `dev`. Справжній infra/Pulumi.dev.yaml НЕ в git: Pulumi кладе
+# туди encryptionsalt, привʼязаний до PULUMI_CONFIG_PASSPHRASE, а demo:rollout сам
+# міняє profile/rev. Усі ключі мають дефолти в index.ts — без файла все працює.
+config:
+  hw28-marketplace:profile: good        # good | bad (bad — навмисно зламаний профіль для порівняння)
+  hw28-marketplace:rev: "1"             # зміна rev змінює pod-шаблон -> rolling update
+  hw28-marketplace:replicas: "3"
+  hw28-marketplace:image: marketplace-api:hw28
+  hw28-marketplace:kubeContext: kind-hw28
