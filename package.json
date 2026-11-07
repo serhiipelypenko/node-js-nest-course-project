@@ -45,7 +45,17 @@
     "demo:upload": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-upload.js",
     "demo:multipart": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-multipart.js",
     "demo:cdn": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-cdn.js",
-    "edge": "bash scripts/with-secrets.sh dev node dist/cdn/edge-main.js"
+    "edge": "bash scripts/with-secrets.sh dev node dist/cdn/edge-main.js",
+    "image:build": "bash scripts/image-build.sh",
+    "cluster:up": "bash scripts/cluster-up.sh",
+    "cluster:down": "bash scripts/cluster-down.sh",
+    "scan": "node scripts/scan.mjs",
+    "up": "bash scripts/with-secrets.sh dev bash scripts/pulumi.sh up",
+    "destroy": "bash scripts/with-secrets.sh dev bash scripts/pulumi.sh destroy",
+    "demo:image": "node demo/image.mjs",
+    "demo:rollout": "bash scripts/with-secrets.sh dev node demo/rollout.mjs",
+    "demo:rollout:compare": "bash scripts/with-secrets.sh dev node demo/rollout.mjs --compare",
+    "demo:pdb": "node demo/pdb.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",

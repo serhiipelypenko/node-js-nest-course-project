@@ -1,0 +1,10 @@
+name: hw28-marketplace
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: >-
+  hw-28. Namespace, Secret, Deployment, Service, PodDisruptionBudget і
+  HorizontalPodAutoscaler сервісу курсового — типізованим кодом, без `kubectl apply -f`.
+  Оточення (НЕ в git): PULUMI_BACKEND_URL=file://<abs>, PULUMI_CONFIG_PASSPHRASE,
+  APP_DB_PASSWORD (зі сховища через scripts/with-secrets.sh).
