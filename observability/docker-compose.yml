@@ -1,0 +1,72 @@
+# hw-29: стенд спостережуваності — Prometheus (метрики, PULL) + Tempo (трейси, PUSH по OTLP) + Grafana.
+# Три контейнери замість `grafana/otel-lgtm`: Prometheus лягає на ТОЙ САМИЙ датасорс, який видно в дашборді,
+# і не треба тримати Loki/колектор, які ДЗ не вимагає (логи — у stdout, доставка в Loki не входить).
+# Запуск:  docker compose -f observability/docker-compose.yml up -d --wait
+# Порти 22900-22999 (щоб не зіткнутись зі стендами попередніх ДЗ): застосунок 22900, Prometheus 22901,
+# Grafana 22902, Tempo API 22904, OTLP/HTTP 22918.
+name: obs
+
+networks:
+  obs-net:
+    name: obs-net
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: obs-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["127.0.0.1:22901:9090"]
+    # Застосунок живе на ХОСТІ, Prometheus — у контейнері. Без цього рядка на Linux скрейп
+    # мовчки не знайде target (на Docker Desktop хост-імʼя вже є, на Linux — ні).
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [obs-net]
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: obs-tempo
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml:ro
+    ports:
+      - "127.0.0.1:22904:3200"   # Tempo HTTP API: GET /api/traces/<trace_id>
+      - "127.0.0.1:22918:4318"   # OTLP/HTTP — сюди застосунок шле спани
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3200/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+    networks: [obs-net]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: obs-grafana
+    environment:
+      # Креденшели Grafana — зі сховища (GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD), інакше дев-значення
+      # (як і dev-пароль ролі `marketplace` у кореневому docker-compose.yml: свіжий клон має підніматись сам).
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-obs_dev_pw}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      # 🔴 Датасорси, налаштовані кліканням, не переживуть перезапуск стенда — тому конфігом.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:22902:3000"]
+    depends_on:
+      prometheus: { condition: service_healthy }
+      tempo: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+    networks: [obs-net]

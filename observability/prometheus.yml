@@ -1,0 +1,12 @@
+# 🔴 scrape_interval підтиснутий СПЕЦІАЛЬНО під демо: дефолтні 15-60 с довші за саме демо, і панель лишається
+# порожньою — виглядає як зламаний датасорс. У проді такі значення не ставлять.
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: obs-app
+    metrics_path: /metrics
+    static_configs:
+      # Застосунок (demo:metrics / obs:serve) слухає 0.0.0.0:22900 на хості.
+      - targets: ['host.docker.internal:22900']

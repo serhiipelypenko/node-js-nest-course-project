@@ -1643,6 +1643,134 @@ SCAN_MAX=99999 npm run scan   # found=7 max-allowed=99999 gate=pass  exit 0
 `ExternalSecret`) або **Secrets Store CSI Driver** (секрет монтується в под як файл і може взагалі не потрапляти в etcd);
 в кластер я їх не ставив — лише описав.
 
+## Observability
+
+Питання цього ДЗ: «о 03:15 один запит віддав 500 — скільки часу потрібно, щоб сказати, що саме сталося».
+Відповідь має бути хвилина: у відповіді клієнту є `trace_id`, він же стоїть у кожному рядку логу й у спані
+трейсу — один ключ, а не три.
+
+**Що саме спостерігається.** Не Nest-моноліт (він тягне Postgres, Redis, RabbitMQ, S3 і JWT-ключі), а
+окремий `node:http`-зріз `src/observability/` з ендпоїнтом оформлення замовлення `POST /orders`
+(+ `GET /orders/:id`, `POST /auth/login`-заглушка для перевірки redaction). Шари: `orders.controller` →
+`orders.service` → `orders.repo`; репозиторій — у памʼяті, але навколо нього справжній ручний спан
+`orders.repo.insert`. Nest-контролери, як і в hw-22/23, цим ДЗ не інструментовані.
+
+```
+src/observability/otel.ts      OTel SDK: ПЕРШИЙ імпорт точки входу; HTTP-автоінструментування, W3C-пропагація,
+                               OTLP-експорт у Tempo + дзеркало спанів у памʼяті для демо
+src/observability/logger.ts    pino: mixin (trace_id/span_id з АКТИВНОГО спана + userId/tenant/idempotencyKey з ALS), redact
+src/observability/context.ts   AsyncLocalStorage
+src/observability/metrics.ts   prom-client: http_requests_total{method,route,status}, http_request_duration_seconds
+src/observability/app.ts       сервер: route-шаблон, RED-мідлвар, /metrics, /health
+src/observability/orders/      controller → service → repository
+src/demo-{logs,metrics,trace}.ts   три демо (build → dist/)
+observability/                 docker-compose стенда, Prometheus, Tempo, провіженінг Grafana, JSON дашборда
+```
+
+### Стенд
+
+`npm run obs:up` = `docker compose -f observability/docker-compose.yml up -d --wait` — Prometheus, Tempo, Grafana
+(три контейнери; `grafana/otel-lgtm` не брав: Prometheus там внутрішній, а дашборду потрібен свій датасорс).
+
+| Сервіс | Адреса | Навіщо |
+|---|---|---|
+| застосунок (`demo:metrics`, `obs:serve`) | `:22900` | `/metrics`, який скрейпить Prometheus (`host.docker.internal:22900`) |
+| Prometheus | `:22901` | метрики, скрейп кожні 2 с (під демо; у проді такого не ставлять) |
+| Grafana | `:22902` | дашборд `obs · RED` (провіжений) |
+| Tempo | `:22904` | `GET /api/traces/<trace_id>` |
+| OTLP/HTTP | `:22918` | куди застосунок шле спани |
+
+**Памʼять** (`docker stats --no-stream`, Docker Desktop 7,65 ГіБ, після ~20 с роботи в спокої): Grafana ≈ 84 МіБ,
+Tempo ≈ 39 МіБ, Prometheus ≈ 22 МіБ — **≈ 146 МіБ** разом; `free -m` у VM Docker: `used` 386 → 554 МіБ.
+З kind-кластером hw-28 (≈ 870 МіБ) влазить із запасом. `up --wait` — ≈ 22 с (образи вже завантажені).
+Годинник хоста й контейнера збігається (`date +%s` проти `docker run --rm alpine:3.20 date +%s`: різниця 2 с — це час
+pull образу, дрейфу немає).
+
+### Змінні
+
+| Змінна | Джерело | Хто читає | Навіщо |
+|---|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | vault (#11) через `with-secrets.sh`; `SKIP_VAULT=1` — `export` | `otel.ts` | адреса приймача трейсів (`http://127.0.0.1:22918`). Не задана — спани лишаються в памʼяті, `demo:logs`/`demo:metrics` працюють без стенда |
+| `PROMETHEUS_URL` | vault (#11) / `export` | `demo:metrics` | довідково: Prometheus бачить те саме число, що й застосунок (`prometheus-matches-app`) |
+| `TRACE_API_URL` | vault (#11) / `export` | `demo:trace` | довідково: той самий `trace_id` у Tempo (`tempo-spans`) |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | vault (#11); у `docker-compose.yml` є дев-значення (`admin` / `obs_dev_pw`) | Grafana | креденшели адміна; для свіжого клона стенд піднімається без них |
+| `OBS_APP_PORT` | не секрет, дефолт `22900` | `demo:metrics`, `obs:serve` | порт, який скрейпить Prometheus |
+| `BURST`, `SENT`, `IDS` | не секрет, дефолти `12` / `60` / `100` | демо | розмір берста / числа запитів |
+| `LOG_LEVEL` | не секрет, дефолт `info` | `logger.ts` | рівень pino |
+
+Нового `.env` немає, у `env.schema.ts` ці змінні **не** додані (як `DB_*`, `REDIS_URL`): їх читає не Nest-сервер, а
+окремий зріз і демо. Три npm-скрипти (`demo:logs|metrics|trace`) запускаються через `scripts/with-secrets.sh`;
+`SKIP_VAULT=1` — обгортка просто виконує команду.
+
+### Три тези — три демо
+
+Кожне чистить стан на старті, друкує в stdout лише `ключ=число`, діагностику — у stderr, і завершується з кодом ≠ 0,
+якщо інваріант порушений (перевірено: `BURST=5 npm run demo:logs` → `exit=1`).
+
+| Демо | Теза | Що рахується |
+|---|---|---|
+| `demo:logs` | (а) корелятор живе в контексті | `layers` (різні `layer` в рядках одного запиту), `distinct-trace-ids`, `trace-id-matches-header`; берст із 12 паралельних запитів: групування рядків за `trace_id` (`burst-trace-ids`, `burst-uneven`), плюс `burst-foreign-user` — чи не потрапив у групу чужий `userId` з ALS; `secret-req-logged` / `secret-in-logs` |
+| `demo:metrics` | (б) множина лейбла обмежена | два скрейпи `/metrics` → `counter-delta`, `errors-delta`; `above-top-bucket = _count − _bucket{le=5}`; `series-before/after` навколо ста різних id |
+| `demo:trace` | (в) один ключ — двоє дверей | спани з `InMemorySpanExporter`: `spans`, `orphan-spans`, `trace-matches-header` (trace-id і parent-id із заголовка), `trace-matches-log` (кожен рядок логу: `trace_id` і `span_id` належать спанам цього трейсу), `span-status-error` |
+
+**Корелятор — `trace_id` активного спана**, а не власний uuid: mixin pino викликає
+`trace.getActiveSpan()?.spanContext().traceId`. `userId`, `tenant`, `idempotencyKey` живуть в `AsyncLocalStorage`
+(у цьому зрізі `userId` — заголовок `x-user-id`; у Nest-частині його ставить `AuthGuard` зі `sub`
+перевіреного токена, hw-24). Функції сервісу й репозиторію не приймають `req`.
+
+**Redaction.** `redact.paths` у `logger.ts`: `req.headers.authorization|cookie|x-api-key`,
+`body.{password,refresh_token,access_token,token}` і `*.password|refresh_token|access_token|token`. 🔴 redact **не вгадує
+шляхів**: `body.profile.token` не описаний — і тече. `demo:logs` показує це числом `unlisted-path-leak=1` (довідково,
+не гейтиться): саме тому список явний, а не «усе, що схоже на секрет».
+
+**Помилки.** `5xx` → серверний спан зі статусом `ERROR` (HTTP-інструментування) і ручний спан репозиторію з
+`recordException`. Для `4xx` OTel лишає `Unset` — `demo:trace` це перевіряє (`span-status-4xx-unset=1`), тому саме
+збій репозиторію (`sku-db-locked`) дає 500, а не валідація.
+
+### Дашборд
+
+`observability/grafana/dashboards/red.json`, датасорс — `observability/grafana/provisioning/datasources/datasources.yml`
+(`uid: obs-prom`). Усе файлом: перезапуск стенда нічого не губить. Три панелі — три питання RED:
+
+| Панель | Питання RED | PromQL |
+|---|---|---|
+| **R** — скільки запитів за секунду | Rate: скільки? | `sum by (route) (rate(http_requests_total[1m]))` |
+| **E** — частка 5xx | Errors: скільки зламалось? | `sum(rate(http_requests_total{status=~"5.."}[1m])) / sum(rate(http_requests_total[1m]))` |
+| **D** — p50 / p95 / p99 | Duration: як довго? | `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[1m])))` (+ 0.5, 0.99) |
+
+`[1m]`, а не `[5m]` — демо триває секунди. Перевірено на живому Prometheus під рівним навантаженням (20 % збоїв):
+`E` = 0,103, p95 = 9,4 мс; Grafana віддає дашборд `obs-red` і обидва датасорси через API.
+
+### Межі бакетів
+
+`[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]` с. Найгірший випадок сервісу — дедлайн репозиторію
+(`REPO_DEADLINE_MS = 2000`), а найповільніший запит у `demo:metrics` — «блокування рядка» на 800 мс (потрапляє в
+`le=1`, `slowest-fits-le=1`). Верхній скінченний `le=5` більший за обидва, тож `histogram_quantile` не впирається
+в межу (`above-top-bucket=0`). Це драбина дефолтних бакетів `prom-client` без хвоста 10 с: крок ≈ ×2–2,5 на всьому діапазоні тримає похибку
+перцентиля в межах одного кроку, а 5 с залишає запас над найгіршим випадком. Якщо демо покаже `above-top-bucket ≠ 0` —
+додають бакетів, а не прибирають повільний запит.
+`Histogram`, а не `Summary`: квантилі `Summary` рахуються на боці застосунку й не агрегуються між інстансами.
+`route` — шаблон (`/orders/:id`), невідомий шлях — константа `unmatched`.
+
+### Мої прогони (три поспіль, `SKIP_VAULT=1`, стенд піднято)
+
+| Ключ | Прогін 1 | Прогін 2 | Прогін 3 |
+|---|---|---|---|
+| `demo:logs`: `layers` / `distinct-trace-ids` / `burst` / `burst-trace-ids` / `burst-uneven` | 4 / 1 / 12 / 12 / 0 | 4 / 1 / 12 / 12 / 0 | 4 / 1 / 12 / 12 / 0 |
+| `demo:logs`: `trace-id-matches-header` / `secret-req-logged` / `secret-in-logs` / `non-json-lines` | 1 / 1 / 0 / 0 | 1 / 1 / 0 / 0 | 1 / 1 / 0 / 0 |
+| `demo:metrics`: `sent-ok` / `sent-fail` / `counter-delta` / `errors-delta` | 45 / 15 / 60 / 15 | 45 / 15 / 60 / 15 | 45 / 15 / 60 / 15 |
+| `demo:metrics`: `above-top-bucket` / `series-before` → `series-after` | 0 / 3 → 3 | 0 / 3 → 3 | 0 / 3 → 3 |
+| `demo:trace`: `spans` / `orphan-spans` / `trace-matches-header` / `trace-matches-log` / `span-status-error` | 2 / 0 / 1 / 1 / 1 | 2 / 0 / 1 / 1 / 1 | 2 / 0 / 1 / 1 / 1 |
+| `demo:trace`: `tempo-spans` (довідково) | 2 | 2 | 2 |
+
+Вивід ідентичний між прогонами (крім самого `trace-id`). Три ряди лічильника — `POST /orders` 201, `POST /orders` 500,
+`GET /orders/:id` 200 — і після ста різних id їх рівно три.
+
+### Що НЕ входить
+
+Алерти, tail-based sampling, доставка логів у Loki, аудит/SIEM (#27), профайлер. Логи йдуть у stdout (`pino-pretty`
+не підключений). Бонуси (GlitchTip, межа сервісів, SLO) не робились.
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -2001,6 +2129,39 @@ npm run destroy && npm run cluster:down   # прибрати після пере
 
 Namespace `marketplace`, Deployment / Service / PDB / HPA — `marketplace-api`. Порядок `demo:pdb` після перевірки
 `disruptionsAllowed` обовʼязковий: демо витрачає бюджет.
+
+### hw-29 (Observability)
+
+Хмарного акаунта не треба: усе локально — застосунок + Prometheus + Grafana + Tempo. Сховища у грейдера нема —
+`SKIP_VAULT=1`, адреси через `export` (змінні — з таблиці розділу [Observability](#observability)). Усі команди — з каталогу,
+де лежить `package.json`; потрібен `docker`.
+
+```bash
+docker compose -f observability/docker-compose.yml up -d --wait   # Prometheus :22901, Grafana :22902, Tempo :22904 / OTLP :22918
+
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:22918
+export PROMETHEUS_URL=http://127.0.0.1:22901
+export TRACE_API_URL=http://127.0.0.1:22904
+export SKIP_VAULT=1       # у грейдера немає доступу до сховища
+
+npm ci
+npx tsc --noEmit; echo "exit=$?"
+
+npm run demo:logs         # layers>=3 distinct-trace-ids=1 trace-id-matches-header=1 burst=12 burst-trace-ids=12 burst-uneven=0 secret-req-logged=1 secret-in-logs=0
+npm run demo:metrics      # sent-ok+sent-fail>=50 counter-delta=sent-ok+sent-fail errors-delta=sent-fail above-top-bucket=0 series-after=series-before
+npm run demo:trace        # spans>=2 orphan-spans=0 trace-matches-header=1 trace-matches-log=1 span-status-error=1
+
+npm run obs:down          # прибрати стенд після перевірки
+```
+
+Кожне демо саме збирає (`npm run build`), чистить стан і завершується кодом ≠ 0 при порушеному інваріанті; `demo:metrics`
+слухає порт `22900` (його скрейпить Prometheus) — порт має бути вільним. Критерій 2 (статичний) і 7 (дашборд —
+`observability/grafana/dashboards/red.json`, три панелі з `rate(`, `5..`, `histogram_quantile(`):
+
+```bash
+node -e "const s=require('./package.json').scripts;const need=['demo:logs','demo:metrics','demo:trace'];const bad=need.filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
+grep -q 'SKIP_VAULT' scripts/with-secrets.sh && echo "аварійний вхід є"
+```
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 
