@@ -1,0 +1,33 @@
+# hw-28: ворота сканування образу. Той самий скрипт, що й локально (`npm run scan`),
+# викликається з РОБОЧИМ порогом: вердикт рахується зі звіту сканера, а не друкується.
+# Поріг навмисно не нуль: навіть distroless nodejs22 :nonroot дає виправні
+# CRITICAL+HIGH, а база сканера оновлюється щодоби. Піднімати SCAN_MAX — лише з PR.
+name: Image scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Збірка образу (токен — GitHub secret, у git його немає)
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          printf '%s' "${NPM_TOKEN:-dummy-npm-token}" > .npm_token
+          npm run image:build
+
+      - name: Сканування з порогом
+        env:
+          SCAN_MAX: "10"
+          SCAN_SEVERITY: CRITICAL,HIGH
+        run: npm run scan

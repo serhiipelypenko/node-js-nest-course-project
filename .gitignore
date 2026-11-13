@@ -20,3 +20,9 @@ backups/
 # hw-16: контракт генерується consumer-тестом (npm run test:contract) і
 # в CI, і локально — не код, не потребує версіонування
 pacts/
+
+# hw-28: секрет етапу збірки, стан Pulumi (файловий бекенд), локальний стек
+.npm_token
+.pulumi/
+service/node_modules/
+service/dist/

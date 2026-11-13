@@ -1,0 +1,13 @@
+{
+  "name": "hw28-infra",
+  "private": true,
+  "description": "hw-28: Pulumi-програма (TypeScript), яка розгортає сервіс курсового в локальний kind",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "@pulumi/kubernetes": "^4.33.0",
+    "@pulumi/pulumi": "^3.144.0"
+  }
+}
