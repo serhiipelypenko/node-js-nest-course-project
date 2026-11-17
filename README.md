@@ -1771,6 +1771,166 @@ pull образу, дрейфу немає).
 Алерти, tail-based sampling, доставка логів у Loki, аудит/SIEM (#27), профайлер. Логи йдуть у stdout (`pino-pretty`
 не підключений). Бонуси (GlitchTip, межа сервісів, SLO) не робились.
 
+## AWS
+
+смуга: основна
+
+teardown-run: ⟨посилання на dispatch-прогін teardown — вставити сюди ПЕРШИМ посиланням після прогону⟩ · регіон: `eu-central-1` (фіксований у `Pulumi.<stack>.yaml`, перевірки знесення йдуть ще й по `us-east-1`)
+
+Де що лежить (для грейдера): програми Pulumi — `infra/base` і `infra/demo` (кожна зі своїм `package.json`);
+**скрипти `up:base`, `up:demo`, `destroy:*`, `demo:*` — у кореневому `package.json`** (перший за алфавітом `package.json`
+у репозиторії — `infra/base/package.json`, тож явно: потрібен саме кореневий). Вільна форма: Free plan — ⟨одним рядком:
+це мій перший акаунт AWS / раніше акаунт був, тож плачу живими грошима⟩.
+
+> Нічого з цього розділу не запускалось у справжньому AWS на момент написання коду: прогони, посилання і `evidence/*` з'являються
+> після `up:base` / `demo:*` / dispatch-прогону. Усе, що можна довести без акаунта, доведено: `npm run test:infra` (16 інваріантів на моках
+> Pulumi) і `tsc --noEmit` обох програм.
+
+### Два стеки
+
+| Стек | Що всередині | Ціна | Живе |
+|---|---|---|---|
+| `base` (`infra/base`) | бюджет → VPC → 2 публічні + 2 приватні підмережі у 2 AZ → IGW → route tables → 2 SG → OIDC-провайдер GitHub + роль teardown | $0/год | скільки завгодно |
+| `demo` (`infra/demo`) | RDS Multi-AZ instance, ALB + target group + Lambda-ціль, NAT за прапорцем `hw31:withNat` | $0,08191/год | години |
+
+Бюджет — **перший** ресурс (`dependsOn` у всіх наступних): `COST`, `MONTHLY`, ліміт $5, `ACTUAL`, `GREATER_THAN`, 20 %. Це лист, а не
+гальмо: дані оновлюються раз на 8–12 годин, тобто за лаг стенд намотає $0,08191 × 12 ≈ $0,98. Зупиняють тип акаунта (Free plan) і destroy.
+У `base` немає жодного погодинного ресурсу (тест `у base немає жодного погодинного ресурсу` + критерій A4 по `evidence/base-state.json`).
+«Приватна» підмережа = у її route table **немає** рядка `0.0.0.0/0`; NAT у постійному стеку немає взагалі.
+
+### Запуск (усе через `scripts/with-secrets.sh`)
+
+Потрібне в оточенні (з vault або вручну): AWS-креденшели (`AWS_PROFILE` або ключі), `HW31_BUDGET_EMAIL`, `HW31_DB_PASSWORD`.
+Ні `pulumi login`, ні `aws configure` не викликаються — бекенд і регіон задає лише оточення процесу.
+Без `HW31_REAL_AWS=1` усі команди нижче друкують `SKIPPED` і виходять з кодом 0 (ворота грошей).
+
+```bash
+export HW31_REAL_AWS=1
+npm run up:base          # S3-бакет стану (якщо немає) → pulumi up base → evidence/base.txt, base-state.json, iam.json, iam.txt
+npm run up:demo          # RDS + ALB (≈ 15–25 хв: Multi-AZ RDS створюється довго)
+npm run demo:failover    # → evidence/demos.txt: az-before, az-after, failover-seconds, event
+npm run demo:alb         # → alb-dns, http-code, target-state
+npm run demo:nat         # → nat-minutes, nat-billed-hours (піднімає NAT і одразу зносить)
+# потім: GitHub → Actions → teardown → Run workflow → посилання на цей прогін у рядок teardown-run вище
+npm run destroy:demo     # те саме локально; у CI це робить teardown.yml
+npm run destroy:base     # після здачі: IAM-роль із правом знесення не має жити довше за курс
+```
+
+Налаштування репозиторію (один раз): Settings → Variables → `HW31_TEARDOWN_ROLE_ARN` (вихід `ciRoleArn` після `up:base`) і
+`HW31_STATE_BUCKET` (`hw31-pulumi-state-<account-id>`). Це **змінні, не секрети**: GitHub Secrets для конвеєра порожні.
+
+### Погодинна ставка (eu-central-1)
+
+Ставки — зі знімка прайс-листа в постановці ДЗ (24.08.2026, курс НБУ 44,7064 грн/$ на 25.08.2026); 730 год на місяць.
+⚠ Колонку «перевірив сам» заповнюю при першій реальній роботі з акаунтом — не раніше.
+
+| Рядок | Ставка | За 730 год | Прайс-лист у постановці | Перевірив сам |
+|---|---|---|---|---|
+| ALB | $0,02700/год | $19,71 | 24.08.2026 | ⟨дата⟩ |
+| RDS db.t4g.micro PostgreSQL, Multi-AZ instance | $0,03700/год | $27,01 | 24.08.2026 | ⟨дата⟩ |
+| gp3 20 ГіБ (Multi-AZ) | $0,274/ГіБ-міс × 20 | $5,48 | 24.08.2026 | ⟨дата⟩ |
+| Public IPv4 × 2 під ALB | $0,00500/год × 2 | $7,30 | 24.08.2026 | ⟨дата⟩ |
+| LCU | припущення про навчальне навантаження, не ставка | $0,29 | — | — |
+| **Разом** | **$0,08191/год** | **$59,79** | | |
+
+4 години життя = $0,33 (≈ 15 грн); забутий місяць = $59,79 (≈ 2 673 грн); кожна забута доба = $1,97 (≈ 88 грн). NAT на вправу: одна
+білена година $0,052 + його Public IPv4 $0,005 = $0,057. Три сервіси — три правила округлення: NAT і ALB — партіальна година як повна;
+RDS — посекундно з мінімумом 10 хвилин (інстанс на 5 хвилин коштує як на 10: $0,0370 × 10/60 = $0,0062).
+
+### IAM-роль teardown: кожен дозвіл і негативний тест
+
+Trust: `Principal.Federated` = OIDC-провайдер `token.actions.githubusercontent.com`; `StringEquals` на `aud` = `sts.amazonaws.com`;
+`StringLike` на `sub` = `repo:serhiipelypenko/node-js-nest-course-project:*` (+ форма з незмінними ID `repo:owner@*/name@*:*`, яку GitHub видає новим репозиторіям).
+У `Action` немає жодного `*`. `Resource: "*"` свідомий скрізь, крім S3: ARN ресурсів `demo` невідомі, коли створюється `base`.
+
+| Дозвіл | Навіщо |
+|---|---|
+| `s3:ListBucket`, `s3:GetBucketLocation` (лише бакет стану) | Pulumi S3-бекенд: перелік стеків і локів, регіон бакета |
+| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` (лише `<бакет>/*`) | прочитати стан `demo`, записати його після destroy, зняти lock-файл |
+| `rds:DeleteDBInstance` | знести базу — головна робота ролі |
+| `rds:DescribeDBInstances` | дочекатись видалення і порахувати `rds-left` |
+| `rds:DeleteDBSubnetGroup`, `rds:DescribeDBSubnetGroups` | знести subnet group бази |
+| `rds:ListTagsForResource` | provider читає теги інстанса перед видаленням |
+| `elasticloadbalancing:DeleteLoadBalancer` | знести ALB |
+| `elasticloadbalancing:DeleteListener` | знести listener :80 |
+| `elasticloadbalancing:DeleteTargetGroup` | знести target group |
+| `elasticloadbalancing:DeregisterTargets` | зняти Lambda-ціль перед видаленням групи |
+| `elasticloadbalancing:DescribeLoadBalancers` | `alb-left` і очікування видалення |
+| `elasticloadbalancing:DescribeListeners`, `…DescribeTargetGroups`, `…DescribeTargetHealth` | provider читає стан цих обʼєктів |
+| `elasticloadbalancing:DescribeLoadBalancerAttributes`, `…DescribeTargetGroupAttributes`, `…DescribeTags` | provider читає атрибути й теги перед delete |
+| `ec2:DeleteNatGateway` | знести NAT, якщо вправа лишила його |
+| `ec2:DescribeNatGateways` | `nat-left` |
+| `ec2:ReleaseAddress`, `ec2:DisassociateAddress` | звільнити Elastic IP NAT (idle IPv4 = $0,005/год) |
+| `ec2:DescribeAddresses` | `eip-left` |
+| `lambda:DeleteFunction`, `lambda:GetFunction` | знести Lambda-ціль |
+| `lambda:RemovePermission`, `lambda:GetPolicy` | прибрати дозвіл `elasticloadbalancing` викликати Lambda |
+| `iam:DeleteRole`, `iam:GetRole` | знести роль виконання Lambda (вона живе в `demo`) |
+| `iam:DetachRolePolicy`, `iam:ListAttachedRolePolicies` | відчепити `AWSLambdaBasicExecutionRole` до видалення ролі |
+| `iam:ListRolePolicies`, `iam:DeleteRolePolicy`, `iam:ListInstanceProfilesForRole` | інлайн-політики й профілі, без яких `DeleteRole` не пройде |
+| `tag:GetResources` | `tagged-resources-left`: один запит по тегу знаходить усе забуте |
+| `sts:GetCallerIdentity` | provider і перевірки питають «хто я» |
+
+Негативний тест (на справжньому IAM, його пише `npm run evidence:iam` у `evidence/iam.txt`):
+
+```bash
+aws iam simulate-principal-policy --policy-source-arn <ciRoleArn> --action-names rds:DeleteDBInstance   # → allowed
+aws iam simulate-principal-policy --policy-source-arn <ciRoleArn> --action-names s3:DeleteBucket        # → implicitDeny
+```
+
+Вивід обох прогонів: ⟨вставити з `evidence/iam.txt` після `up:base`⟩. Одна перевірена політика не робить акаунт безпечним:
+перевірено одну дію проти одного принципала; порядкове читання trust policy — на #32.
+
+### RDS Multi-AZ проти мого стека з #15
+
+У #15 у мене були primary + replica + PgBouncer + `backup.sh`/`restore-drill.sh`. Що RDS забирає на себе, а що ні:
+
+- **Забирає:** фізичну реплікацію в іншу зону (синхронний standby) і **автоматичний failover** з перемиканням DNS (`demo:failover` міряє це
+  на своєму інстансі; офіційно 60–120 с); патчі ОС і мінорних версій; автоматичні бекапи та PITR (`backupRetentionPeriod: 1`);
+  шифрування диска (`storageEncrypted`).
+- **Не забирає:** standby **не читається** — це не read replica, масштабування читань лишається моїм (replica з #15 нікуди не дівається,
+  у RDS це окремий read replica за окремі гроші); **PgBouncer** — пулінг і `auth_query` лишаються моїми (RDS Proxy — інший платний сервіс);
+  міграції, схема, індекси, `seed`; **перевірка відновлення**: автоматичний бекап не доводить, що з нього можна підняти базу, — `restore-drill.sh`
+  і виміряні RTO/RPO лишаються моїми; ротація пароля без рестарту застосунку (`rotate.sh`) — теж моя.
+- **Неправда, яку легко написати:** «Multi-AZ рівно вдвічі дорожче» — сховище подвоюється рівно, інстанс майже ($0,019 → $0,037).
+  І Multi-AZ **instance** ≠ Multi-AZ **DB cluster** (інші класи, від $0,2385/год — $174/міс проти $27).
+- Failover через `--force-failover` — керований перемикач: я міряю процедуру, а не справжній інцидент.
+
+### KMS
+
+KMS **не заміна** сховищу секретів з #11, а шар під ним: ключ, яким шифрується мій `ENCRYPTION_KEY` (і диск RDS). Секрет усе одно живе
+у vault, а в AWS — тільки керований ключ `aws/rds` (безкоштовний, без рядка в рахунку). **Власний customer-managed key не створюю:**
+це $1/міс, що не зникає від destroy того ж дня.
+
+### Бекенд стану: чим відрізняється від #28
+
+У #28 стан — `file://` на моєму ноутбуці: простий, без логіну, але **недосяжний** для воркера GitHub. Тут стан мусить читатись із CI,
+тому — **S3 у власному акаунті** (бакет створює `scripts/aws-pulumi.sh`: версіонування, закритий публічний доступ). Чому не Pulumi Cloud:
+він теж підходить ($0, individual), але вимагає `PULUMI_ACCESS_TOKEN` у GitHub Secrets, а в цьому ДЗ конвеєр не має секретів взагалі —
+доступ до стану дає та сама OIDC-роль (`s3:*Object` лише на цей бакет). Ціна рішення: порожня парольна фраза (`PULUMI_CONFIG_PASSPHRASE=""`) —
+єдиний секрет у стані (одноразовий пароль демо-бази в приватній підмережі без входу ззовні) шифрується «для вигляду». Для проду — `awskms://`,
+але це власний ключ, а їх я не створюю.
+
+### Відхилення від буквального тексту ДЗ
+
+- `tagged-resources-left` рахує ресурси з тегами `Project=nodejs-pro-hw31` **і** `Stack=demo`: `base` (VPC, ролі) має стояти між прогонами і теж
+  має тег `Project`, тож без фільтра по стеку нуль був би недосяжним. Знесений NAT виключено за ARN (його ще довго видно в тег-API); живі NAT
+  рахує `nat-left`.
+- `nat-left` рахує `available` і `pending` (лекційний референс), а не тільки `available`.
+- Регіон — у `Pulumi.<stack>.yaml`; скрипти демо беруть `AWS_REGION` (за замовчуванням той самий `eu-central-1`) і ходять в AWS з явним `--region`.
+- Якщо failover вийде за 60–120 с — окремим рядком тут: ⟨заповнити після прогону⟩.
+
+### Прибирання
+
+```bash
+npm run destroy:demo && npm run destroy:base      # знесення + `pulumi stack rm base`
+aws s3 rb s3://hw31-pulumi-state-<account-id> --force   # бакет стану лишається: ≈ $0, але це теж ресурс
+# контроль «нічого не лишилось» (обидва регіони):
+aws resourcegroupstaggingapi get-resources --region eu-central-1 --tag-filters Key=Project,Values=nodejs-pro-hw31 --query 'length(ResourceTagMappingList)'
+aws resourcegroupstaggingapi get-resources --region us-east-1   --tag-filters Key=Project,Values=nodejs-pro-hw31 --query 'length(ResourceTagMappingList)'
+```
+
+Не запускати `AWS Organizations` / Control Tower (знімають Free plan), не апгрейдитись із Free на Paid.
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -2162,6 +2322,29 @@ npm run obs:down          # прибрати стенд після переві�
 node -e "const s=require('./package.json').scripts;const need=['demo:logs','demo:metrics','demo:trace'];const bad=need.filter(k=>/with-secrets\.sh/.test(s[k]||'')===false);console.log(bad.length===0?'OK':'без обгортки: '+bad.join(', '));process.exit(bad.length===0?0:1)"
 grep -q 'SKIP_VAULT' scripts/with-secrets.sh && echo "аварійний вхід є"
 ```
+
+### hw-31 (AWS core: base/demo, IAM+OIDC, RDS Multi-AZ, ALB, нічне знесення)
+
+Акаунта AWS у грейдера нема, тому оцінюється код, `evidence/*` і **прогін `teardown` у GitHub Actions** (посилання — у першому рядку
+`teardown-run:` розділу [AWS](#aws)). Усі команди — з кореня клону; `REPO=<owner>/<repo>`, `gh` автентифікований.
+
+```bash
+export REPO=<owner>/<repo>
+for d in infra/base infra/demo; do ( cd "$d" && npm ci >/dev/null 2>&1 && npx tsc --noEmit ); echo "$d exit=$?"; done   # A1: exit=0 ×2
+npm run test:infra                                                                    # інваріанти на моках Pulumi, без хмари
+
+grep -ciE '^ *смуга: *(основна|запасна)' README.md                                   # G1: ≥ 1
+L=$(grep -oE 'https://github.com/[^ )]+/actions/runs/[0-9]+' README.md | head -1); echo "run-link=${L:-НЕМАЄ}"
+RUN=$(grep -oE 'actions/runs/[0-9]+' README.md | head -1 | tr -dc '0-9')
+gh run view "$RUN" --repo "$REPO" --log > /tmp/teardown.log
+for k in state-resources-left tagged-resources-left rds-left alb-left nat-left eip-left; do
+  v=$(grep -oE "$k=[0-9]+" /tmp/teardown.log | tail -1 | cut -d= -f2); printf '%s=%s %s\n' "$k" "${v:-НЕМАЄ}" "$([ "$v" = 0 ] && echo OK || echo ПРОВАЛ)"
+done                                                                                  # G2: шість нулів
+```
+
+Решта критеріїв (A2–A4, B1–B3, C1–C3, D1–D4) читаються дослівно з `task.md` по `evidence/*.txt|json`, `infra/*/stack.ts`, `.github/workflows/teardown.yml`
+і кореневому `package.json`. Скрипти `up:base`, `up:demo`, `destroy:demo`, `destroy:base`, `demo:failover`, `demo:nat`, `demo:alb` — усі через
+`scripts/with-secrets.sh`; **у грейдера їх запускати не треба** (вони створюють платні ресурси в чужому акаунті).
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 

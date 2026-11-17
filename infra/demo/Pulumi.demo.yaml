@@ -1,0 +1,13 @@
+config:
+  aws:region: eu-central-1
+  aws:defaultTags:
+    tags:
+      Project: nodejs-pro-hw31
+      Stack: demo
+      ManagedBy: pulumi
+  hw31:withNat: "false"
+  # hw31:dbPassword — лише через `config set --secret` (це робить scripts/aws-pulumi.sh із HW31_DB_PASSWORD)
+
+  hw31:dbPassword:
+    secure: v1:HXMzosdOLPG24nt3:z6Pt/ppfTaE1nupPglDn7375cL1ORURhO/rW/vAW0+i7dMdouoklGENrKcF48nQR
+encryptionsalt: v1:zSlB40qFNUA=:v1:VeCGk32FdpUvnSEc:MyZ6USB2jy/EH0GwqsK2x3Gub7/HeQ==

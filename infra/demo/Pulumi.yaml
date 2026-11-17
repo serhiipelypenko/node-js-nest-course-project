@@ -1,0 +1,6 @@
+name: hw31-demo
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: "hw-31 — стек demo: RDS Multi-AZ, ALB, NAT за прапорцем. Погодинне — зносити того ж вечора."

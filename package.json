@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність); hw-26 (файли: presigned-завантаження повз API, multipart з відновленням, закритий бакет за кеш-шаром, ассети з хешем в імені)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність); hw-26 (файли: presigned-завантаження повз API, multipart з відновленням, закритий бакет за кеш-шаром, ассети з хешем в імені); hw-31 (AWS core: два стеки Pulumi base/demo, бюджет, VPC, IAM+OIDC, RDS Multi-AZ, ALB, NAT-вимір, нічне знесення з шістьма нулями в CI)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -61,7 +61,17 @@
     "obs:serve": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/obs-serve.js",
     "demo:logs": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-logs.js",
     "demo:metrics": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-metrics.js",
-    "demo:trace": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-trace.js"
+    "demo:trace": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-trace.js",
+    "up:base": "bash scripts/with-secrets.sh dev bash scripts/aws-pulumi.sh up base",
+    "up:demo": "bash scripts/with-secrets.sh dev bash scripts/aws-pulumi.sh up demo",
+    "destroy:demo": "bash scripts/with-secrets.sh dev bash scripts/aws-pulumi.sh destroy demo",
+    "destroy:base": "bash scripts/with-secrets.sh dev bash scripts/aws-pulumi.sh destroy base",
+    "demo:failover": "bash scripts/with-secrets.sh dev node demo/failover.mjs",
+    "demo:nat": "bash scripts/with-secrets.sh dev node demo/nat.mjs",
+    "demo:alb": "bash scripts/with-secrets.sh dev node demo/alb.mjs",
+    "evidence:base": "bash scripts/with-secrets.sh dev node scripts/aws-evidence-base.mjs",
+    "evidence:iam": "bash scripts/with-secrets.sh dev node scripts/aws-evidence-iam.mjs",
+    "test:infra": "npm --prefix infra/base test && npm --prefix infra/demo test"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",

@@ -1,0 +1,66 @@
+# hw-31: знесення стеку demo щоночі і вручну. Автентифікація — OIDC-роль зі стеку base: ЖОДНИХ ключів і жодного
+# GitHub Secret. Два НЕсекретні параметри — repository variables (Settings → Variables):
+#   HW31_TEARDOWN_ROLE_ARN — вихід ciRoleArn стеку base
+#   HW31_STATE_BUCKET      — S3-бакет зі станом Pulumi (створює scripts/aws-pulumi.sh)
+# 🔴 Порядок: destroy → export → шість перевірок. Без `stack rm`: після нього експорту вже немає.
+# 🔴 Стан має бути досяжним з CI: S3-бекенд у власному акаунті (file:// з hw-28 воркер не бачить).
+# ⚠ schedule працює лише з дефолтної гілки (main) і може запізнюватись; здається dispatch-прогін.
+name: teardown
+on:
+  schedule: [{ cron: '0 2 * * *' }]
+  workflow_dispatch: {}
+permissions:
+  id-token: write      # без цього GitHub не видасть OIDC-токен
+  contents: read
+env:
+  AWS_REGION: eu-central-1
+  STACK: demo
+  PULUMI_BACKEND_URL: s3://${{ vars.HW31_STATE_BUCKET }}?region=eu-central-1
+  PULUMI_CONFIG_PASSPHRASE: ""        # порожня, але ЗАДАНА: у стані лише одноразовий пароль демо-бази
+  PULUMI_SKIP_UPDATE_CHECK: "true"
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.HW31_TEARDOWN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: pulumi/actions@v6
+      - name: npm ci (infra/demo)
+        working-directory: infra/demo
+        run: npm ci --no-audit --no-fund
+      - name: pulumi destroy
+        working-directory: infra/demo
+        run: |
+          set -euo pipefail
+          if pulumi stack select "$STACK" >/dev/null 2>&1; then
+            pulumi destroy --yes --non-interactive --skip-preview --stack "$STACK"
+          else
+            echo "стеку $STACK в бекенді немає — знищувати нічого"
+          fi
+      - name: шість нулів
+        working-directory: infra/demo
+        run: |
+          set -euo pipefail
+          R="$AWS_REGION"
+          # Тег-API порегіонний: свій регіон + us-east-1. Фільтр Stack=demo — бо base (VPC, ролі) стоїть тижнями
+          # і теж має Project; знесений NAT ще довго видно в тег-API, тому його виключаємо (живі NAT рахує nat-left).
+          tagged() { aws resourcegroupstaggingapi get-resources --region "$1" \
+            --tag-filters Key=Project,Values=nodejs-pro-hw31 Key=Stack,Values=demo \
+            --query "length(ResourceTagMappingList[?!contains(ResourceARN, ':natgateway/')])" --output text; }
+          if pulumi stack select "$STACK" >/dev/null 2>&1; then
+            STATE=$(pulumi stack export --stack "$STACK" | jq '[.deployment.resources[]?|select(.type|startswith("aws:"))]|length')
+          else
+            STATE=0
+          fi
+          echo "state-resources-left=$STATE"
+          echo "tagged-resources-left=$(( $(tagged "$R") + $(tagged us-east-1) ))"
+          echo "rds-left=$(aws rds describe-db-instances --region "$R" --query 'length(DBInstances)' --output text)"
+          echo "alb-left=$(aws elbv2 describe-load-balancers --region "$R" --query 'length(LoadBalancers)' --output text)"
+          echo "nat-left=$(aws ec2 describe-nat-gateways --region "$R" --filter Name=state,Values=available,pending --query 'length(NatGateways)' --output text)"
+          echo "eip-left=$(aws ec2 describe-addresses --region "$R" --query 'length(Addresses)' --output text)"

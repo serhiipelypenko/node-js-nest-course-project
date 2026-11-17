@@ -1,3 +1,7 @@
 node_modules/
 Pulumi.*.yaml
 !Pulumi.*.yaml.example
+
+# hw-31: конфіги стеків base/demo — у git (теги aws:defaultTags читає грейдер; секретів немає, лише шифрований пароль одноразової бази)
+!base/Pulumi.base.yaml
+!demo/Pulumi.demo.yaml
