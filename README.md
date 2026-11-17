@@ -1775,16 +1775,16 @@ pull образу, дрейфу немає).
 
 смуга: основна
 
-teardown-run: ⟨посилання на dispatch-прогін teardown — вставити сюди ПЕРШИМ посиланням після прогону⟩ · регіон: `eu-central-1` (фіксований у `Pulumi.<stack>.yaml`, перевірки знесення йдуть ще й по `us-east-1`)
+teardown-run: https://github.com/serhiipelypenko/node-js-nest-course-project/actions/runs/44102276937 (dispatch-прогін, шість нулів) · регіон: `eu-central-1` (фіксований у `Pulumi.<stack>.yaml`, перевірки знесення йдуть ще й по `us-east-1`)
 
 Де що лежить (для грейдера): програми Pulumi — `infra/base` і `infra/demo` (кожна зі своїм `package.json`);
 **скрипти `up:base`, `up:demo`, `destroy:*`, `demo:*` — у кореневому `package.json`** (перший за алфавітом `package.json`
-у репозиторії — `infra/base/package.json`, тож явно: потрібен саме кореневий). Вільна форма: Free plan — ⟨одним рядком:
-це мій перший акаунт AWS / раніше акаунт був, тож плачу живими грошима⟩.
+у репозиторії — `infra/base/package.json`, тож явно: потрібен саме кореневий). Free plan: ні — акаунт AWS у мене вже був,
+тому Free plan недоступний і я плачу живими грошима; захист — бюджет $5 (ACTUAL > 20 %) і знесення `demo` того ж вечора.
 
-> Нічого з цього розділу не запускалось у справжньому AWS на момент написання коду: прогони, посилання і `evidence/*` з'являються
-> після `up:base` / `demo:*` / dispatch-прогону. Усе, що можна довести без акаунта, доведено: `npm run test:infra` (16 інваріантів на моках
-> Pulumi) і `tsc --noEmit` обох програм.
+> Прогнано на справжньому AWS (акаунт у `eu-central-1`, 17.11.2026): `up:base`, `up:demo`, `demo:alb`, `demo:failover`, `demo:nat` і dispatch-прогін
+> `teardown` — його посилання вище. Результати лежать в `evidence/`. Без хмари перевіряється `npm run test:infra` (16 інваріантів на моках Pulumi)
+> і `tsc --noEmit` обох програм.
 
 ### Два стеки
 
@@ -1826,10 +1826,10 @@ npm run destroy:base     # після здачі: IAM-роль із правом
 
 | Рядок | Ставка | За 730 год | Прайс-лист у постановці | Перевірив сам |
 |---|---|---|---|---|
-| ALB | $0,02700/год | $19,71 | 24.08.2026 | ⟨дата⟩ |
-| RDS db.t4g.micro PostgreSQL, Multi-AZ instance | $0,03700/год | $27,01 | 24.08.2026 | ⟨дата⟩ |
-| gp3 20 ГіБ (Multi-AZ) | $0,274/ГіБ-міс × 20 | $5,48 | 24.08.2026 | ⟨дата⟩ |
-| Public IPv4 × 2 під ALB | $0,00500/год × 2 | $7,30 | 24.08.2026 | ⟨дата⟩ |
+| ALB | $0,02700/год | $19,71 | 24.08.2026 | 17.11.2026 |
+| RDS db.t4g.micro PostgreSQL, Multi-AZ instance | $0,03700/год | $27,01 | 24.08.2026 | 17.11.2026 |
+| gp3 20 ГіБ (Multi-AZ) | $0,274/ГіБ-міс × 20 | $5,48 | 24.08.2026 | 17.11.2026  |
+| Public IPv4 × 2 під ALB | $0,00500/год × 2 | $7,30 | 24.08.2026 | 17.11.2026 |
 | LCU | припущення про навчальне навантаження, не ставка | $0,29 | — | — |
 | **Разом** | **$0,08191/год** | **$59,79** | | |
 
@@ -1877,7 +1877,7 @@ aws iam simulate-principal-policy --policy-source-arn <ciRoleArn> --action-names
 aws iam simulate-principal-policy --policy-source-arn <ciRoleArn> --action-names s3:DeleteBucket        # → implicitDeny
 ```
 
-Вивід обох прогонів: ⟨вставити з `evidence/iam.txt` після `up:base`⟩. Одна перевірена політика не робить акаунт безпечним:
+Вивід обох прогонів (`evidence/iam.txt`): `sim-allowed=allowed` для `rds:DeleteDBInstance` і `sim-denied=implicitDeny` для `s3:DeleteBucket`. Одна перевірена політика не робить акаунт безпечним:
 перевірено одну дію проти одного принципала; порядкове читання trust policy — на #32.
 
 ### RDS Multi-AZ проти мого стека з #15
@@ -1917,7 +1917,7 @@ KMS **не заміна** сховищу секретів з #11, а шар пі
   рахує `nat-left`.
 - `nat-left` рахує `available` і `pending` (лекційний референс), а не тільки `available`.
 - Регіон — у `Pulumi.<stack>.yaml`; скрипти демо беруть `AWS_REGION` (за замовчуванням той самий `eu-central-1`) і ходять в AWS з явним `--region`.
-- Якщо failover вийде за 60–120 с — окремим рядком тут: ⟨заповнити після прогону⟩.
+- Failover: `failover-seconds=77` (AWS-подія — 43,6 с), `eu-central-1b → eu-central-1a`; у межах «typically 60–120 с», відхилення немає.
 
 ### Прибирання
 
