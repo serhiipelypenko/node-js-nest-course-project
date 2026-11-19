@@ -1,0 +1,51 @@
+name: evidence
+description: >-
+  Збирає артефакт pipeline-evidence із частин evidence-part-* цього прогону й вивантажує його. Викликається з джоби
+  з `if: always()`: без цього артефакту не буде саме на червоному прогоні.
+inputs:
+  run-id:
+    description: github.run_id
+    required: true
+  head-sha:
+    description: SHA голови гілки PR (на pull_request github.sha — це merge-коміт!)
+    required: true
+  image-ref:
+    description: повний ref образу з тегом
+    required: true
+  built-digest:
+    description: sha256:… з output джоби збірки
+    required: true
+  scan-exit:
+    description: код виходу npm run scan
+    required: true
+  deploy-env:
+    description: середовище, чиї deployment.json/rollout.txt беремо
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: частини артефакту від усіх джоб
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      continue-on-error: true   # на червоному прогоні частин може не бути — це не привід губити решту
+      with:
+        pattern: evidence-part-*
+        path: parts
+    - name: evidence.txt (усе рахується з файлів цього прогону)
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run-id }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        BUILT_DIGEST: ${{ inputs.built-digest }}
+        SCAN_EXIT: ${{ inputs.scan-exit }}
+        DEPLOY_ENV: ${{ inputs.deploy-env }}
+        PARTS_DIR: parts
+        OUT_DIR: pipeline-evidence
+      run: node scripts/ci/collect-evidence.mjs
+    - name: pipeline-evidence
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: pipeline-evidence
+        path: pipeline-evidence/
+        if-no-files-found: error

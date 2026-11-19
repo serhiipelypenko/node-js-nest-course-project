@@ -26,3 +26,7 @@ pacts/
 .pulumi/
 service/node_modules/
 service/dist/
+
+# hw-32: тимчасові входи гейтів
+.tmp-gates/
+.tmp-contract/

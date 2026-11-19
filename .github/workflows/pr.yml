@@ -1,0 +1,51 @@
+# hw-32: конвеєр пулреквесту. Усе, що тут червоне, — незливне (після того, як імена перевірок додано в required checks
+# правила гілки main: Settings → Rules; без цього червона джоба — лише попередження).
+# Кроки: гейти якості → ЄДИНА збірка → сканер → pulumi preview + гейт вартості → деплой у kind і demo:rollout.
+# Гілка має жити у ЦЬОМУ ж репозиторії: з форка секрети й GITHUB_TOKEN із packages: write недоступні.
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]   # labeled: лейбл cost-approved перезапускає гейт вартості
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true   # два прогони одного PR не повинні змагатися за той самий реєстр і кластер
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-build.yml
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    needs: ci
+    uses: ./.github/workflows/ci-deploy.yml
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    with:
+      environment: preview
+      image: ${{ needs.ci.outputs.image }}
+      digest: ${{ needs.ci.outputs.digest }}
+
+  evidence:
+    needs: [ci, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/evidence
+        with:
+          run-id: ${{ github.run_id }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          image-ref: ${{ needs.ci.outputs.image-ref }}
+          built-digest: ${{ needs.ci.outputs.digest }}
+          scan-exit: ${{ needs.ci.outputs.scan-exit }}
+          deploy-env: preview

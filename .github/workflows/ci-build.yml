@@ -1,0 +1,204 @@
+# hw-32: спільна частина конвеєра — гейти якості, ЄДИНЕ місце збірки образу, сканування, план інфраструктури + гейт вартості.
+# Викликається з pr.yml і deploy.yml (reusable workflow). Кожна джоба — місце, яке має право сказати «ні».
+#
+#   actionlint ─┐
+#   types ──────┤
+#   contract ───┼─► build (digest у outputs) ─┬─► scan (SCAN_MAX)
+#   arch ───────┘                             └─► plan (pulumi preview + гейт вартості)
+#
+# Збірка рівно одна: далі всі джоби беруть digest з outputs цієї, а не тег.
+name: ci-build
+
+on:
+  workflow_call:
+    outputs:
+      image:
+        description: ім'я образу без тега й digest
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: sha256:… збірки (output кроку збірки)
+        value: ${{ jobs.build.outputs.digest }}
+      image-ref:
+        description: ім'я:тег (тег — для людини, деплоїться digest)
+        value: ${{ jobs.build.outputs.image-ref }}
+      scan-exit:
+        description: код виходу npm run scan
+        value: ${{ jobs.scan.outputs.exit }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: actionlint (needs на неіснуючу джобу, одруковки в контексті, невідомий runs-on)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color # 1.7.12
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: tsc --noEmit + eslint
+        run: npm run ci:types
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # потрібна база (origin/main) для oasdiff
+      - name: oasdiff breaking проти бази
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then BASE_REV="origin/$BASE_REF"; else BASE_REV="HEAD~1"; fi
+          BASE_REV="$BASE_REV" npm run ci:contract
+
+  arch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: dependency-cruiser (заборонений імпорт між модулями)
+        run: npm run ci:arch
+
+  build:
+    needs: [actionlint, types, contract, arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # реєстр — через GITHUB_TOKEN, а не через збережений пароль
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: meta
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/marketplace-api" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: збірка — єдине місце в конвеєрі
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: service
+          file: docker/Dockerfile
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          # звʼязує пакет GHCR із репозиторієм: права GITHUB_TOKEN на pull у наступних джобах
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          # токен приватного реєстру npm — секрет ЕТАПУ збірки (mount=secret). Реєстр у курсі публічний,
+          # тож значення — приманка; справжнього ключа ні в образі, ні в секретах репозиторію немає.
+          secrets: |
+            npm_token=ci-build-placeholder
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: build.log — рядок на кожен виклик збірки
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          test -n "$DIGEST"
+          mkdir -p evidence-part
+          printf 'build run=%s digest=%s\n' "$GITHUB_RUN_ID" "$DIGEST" >> evidence-part/build.log
+          echo "built-digest=$DIGEST"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-part-build
+          path: evidence-part/
+          if-no-files-found: ignore
+
+  scan:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      exit: ${{ steps.scan.outputs.exit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: сканер із порогом (npm run scan з hw-28) — те, що зібрали, за digest
+        id: scan
+        env:
+          REF: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          SCAN_MAX: ${{ vars.SCAN_MAX || '10' }}   # поріг піднімається лише свідомо, з PR
+          SCAN_SEVERITY: CRITICAL,HIGH
+        run: |
+          docker pull "$REF" > /dev/null
+          set +e
+          SCAN_IMAGE="$REF" npm run -s scan
+          code=$?
+          set -e
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+
+  plan:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          infra: "true"
+      - uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+      - name: секрет застосунку для плану (одноразовий, не зі сховища GitHub)
+        run: |
+          secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$secret"
+          echo "APP_DB_PASSWORD=$secret" >> "$GITHUB_ENV"
+      - name: pulumi preview --json -> plan.json
+        env:
+          SKIP_VAULT: "1"
+          PULUMI_CONFIG_PASSPHRASE: ""
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          mkdir -p evidence-part
+          bash scripts/pulumi.sh config set image "$IMAGE"
+          bash scripts/pulumi.sh preview --json --non-interactive > evidence-part/plan.json
+      - name: гейт вартості (рішення — код виходу, обхід — іменний лейбл)
+        env:
+          PLAN_JSON: evidence-part/plan.json
+          COST_BUDGET_USD: ${{ vars.COST_BUDGET_USD || '10' }}
+          COST_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'cost-approved') }}
+        run: |
+          set +e
+          npm run -s gate:cost | tee evidence-part/cost.txt
+          code="${PIPESTATUS[0]}"
+          set -e
+          if [ "$code" -ne 0 ] && [ "$COST_APPROVED" = "true" ]; then
+            echo "::warning::бюджет перевищено, обхід лейблом cost-approved (вердикт вище)"
+            exit 0
+          fi
+          exit "$code"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-part-plan
+          path: evidence-part/
+          if-no-files-found: ignore

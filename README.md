@@ -1931,6 +1931,167 @@ aws resourcegroupstaggingapi get-resources --region us-east-1   --tag-filters Ke
 
 Не запускати `AWS Organizations` / Control Tower (знімають Free plan), не апгрейдитись із Free на Paid.
 
+## CI/CD
+
+hw-32 — останній крок проєктної лінії: те, що на hw-28 я запускав руками зі своєї машини, тепер робить конвеєр, а я лише натискаю «merge».
+Конвеєр — це набір місць, кожне з яких має право сказати «ні»; усе, що не вміє сказати «ні», — звіт, а не гейт. Тому кожен гейт має
+локальне демо **в обидва боки** (`npm run demo:gates`) і хоч раз бачив червоний вхід.
+
+cost-gate-bypass-label: cost-approved
+
+Хмарного акаунта немає: гейт OIDC стоїть у конвеєрі перед джобою деплою й сам вирішує, пускати її далі чи ні («без хмари» з ДЗ).
+Цілі деплою — **ефемерні kind-кластери всередині раннера** (те саме, що на hw-28); образ — у GHCR, digest звіряється з реєстром.
+
+### Схема джоб
+
+```
+pr.yml (pull_request)                              deploy.yml (push main · workflow_dispatch)
+───────────────────────────────────────────        ───────────────────────────────────────────
+ci  ← ci-build.yml (reusable)                      ci  ← ci-build.yml
+ ├ actionlint ┐                                     staging     ← ci-deploy.yml  (rollout ✔)
+ ├ types      │                                     production  ← ci-deploy.yml  (той самий digest, смоук)
+ ├ contract   ├─► build ─┬─► scan                  evidence (if: always())
+ └ arch       ┘          └─► plan (preview + cost)
+deploy ← ci-deploy.yml  (environment: preview)
+ └ OIDC-гейт → kind → образ за digest → pulumi up → deployment.json → demo:rollout
+evidence (if: always()) → артефакт pipeline-evidence
+```
+
+| Файл | Що робить |
+|---|---|
+| `.github/workflows/pr.yml` | тригер `pull_request` (+ `labeled`/`unlabeled`: лейбл обходу перезапускає гейт вартості) → `ci` → `deploy` (середовище `preview`) → `evidence` |
+| `.github/workflows/deploy.yml` | `push` у `main` і `workflow_dispatch`: `ci` → `staging` → `production` → `evidence` |
+| `.github/workflows/ci-build.yml` | reusable: `actionlint`, `types`, `contract`, `arch`, **`build` (єдине місце збірки)**, `scan`, `plan` |
+| `.github/workflows/ci-deploy.yml` | reusable: OIDC-гейт, kind, образ за digest, `pulumi up`, `deployment.json`, `demo:rollout` |
+| `.github/workflows/contract.yml`, `teardown.yml` | з hw-16 і hw-31; запінені за SHA, `id-token` — на джобі. `contract.yml` більше не біжить на PR (див. нижче) |
+| `.github/actions/setup`, `.github/actions/evidence` | composite: Node + `npm ci` з кешем; збирання й вивантаження `pipeline-evidence` |
+| `oidc/policy.json`, `scripts/oidc-gate.mjs` | умова довіри (iss, aud, дозволені sub) і гейт, що перевіряє підпис |
+| `src/mapping.ts`, `src/gate-cost.ts` | перекладач плану Pulumi в гроші й гейт вартості |
+| `.dependency-cruiser.cjs`, `eslint.config.mjs`, `scripts/ci/*` | правила сходинок якості та допоміжні скрипти конвеєра |
+
+`contract.yml` (Pact, hw-16) залишено лише на `push` у `main` і `workflow_dispatch`: грейдер бере **перший успішний прогін на голові PR**, і другий
+воркфлоу з успіхом на тому ж SHA міг би перебити вибір та підсунути прогін без артефакту `pipeline-evidence`. `image-scan.yml` (hw-28) прибрано:
+його роль виконує сходинка 4 (`scan`), і він збирав образ вдруге.
+
+### Чотири сходинки гейтів — і кожна вміє впасти
+
+| # | Сходинка | Інструмент (як у конвеєрі) | Що ловить | Зламаний вхід у `demo:gates` |
+|---|---|---|---|---|
+| 1 | `types` | `tsc --noEmit` + `eslint` (`npm run ci:types`) | помилку в моєму коді | `fixtures/types-broken/broken.ts` — одруковка в типі |
+| 2 | `contract` | `oasdiff breaking --fail-on ERR` проти `main` (`npm run ci:contract`) | «PR зламав того, хто вже живе на v1» (Pact ловить лише відомого споживача) | спека з перейменованим обовʼязковим полем `price_cents` |
+| 3 | `arch` | `dependency-cruiser` (`npm run ci:arch`) | заборонений імпорт між модулями | `fixtures/arch-broken`: `products → orders` |
+| 4 | `image` | `npm run scan` із порогом `SCAN_MAX` (hw-28, без змін) | знахідки CRITICAL/HIGH вище порога | `SCAN_MAX=-1` на підготовленому звіті сканера |
+
+Сходинка 3 робить фразу «модулі не лізуть один в одного» перевірюваною: `products` не імпортує `orders` (залежність лише в один бік —
+`orders → products`), `src/common` — листок, `auth` не знає про ресурси, `messaging` не знає про `outbox`, циклів між файлами немає
+(крім `src/entities`: двосторонні звʼязки TypeORM — цикл за задумом ORM). `npm run demo:gates` ганяє кожну сходинку двічі тим самим інструментом
+(коди — реальні коди інструментів, без `|| true`/`continue-on-error`). Поріг сканера в конвеєрі — `vars.SCAN_MAX` (за замовчуванням 10, як на hw-28);
+база сканера оновлюється щодоби, тож піднімати поріг — свідомо, з PR.
+
+### Збірка один раз, просування за digest
+
+Образ збирається в **одному** кроці конвеєра (`build` у `ci-build.yml`). Джоба віддає `digest` у `outputs`; `scan`, `plan` і деплой беруть його з
+`needs.<…>.outputs`, а не з тега. Тег `${{ github.sha }}` теж поставлено — для людини, але деплоїться `…/marketplace-api@sha256:…`. `staging` і
+`production` отримують той самий digest; джоба деплою падає, якщо `deployment.json` містить інший. Образ потрапляє у вузол kind командою
+`scripts/ci/kind-pull.sh` (`ctr images pull` по digest усередині вузла токеном `GITHUB_TOKEN`) — образу, якого в кластері немає, відповідає `ErrImagePull`.
+`REV` у шаблоні пода дорівнює digest: нова ревізія = викочування (інакше `pulumi up` не бачить різниці).
+
+> ⚠ Пакет GHCR створюється **приватним**. Критерій 5 звіряє digest із реєстром анонімно, тож після першого успішного прогону:
+> GitHub → профіль → Packages → `marketplace-api` → Package settings → Change visibility → **Public**. Якщо лишити приватним — критерій 5
+> перевіряється тільки за артефактом `pipeline-evidence` (втрачений бал).
+
+### OIDC замість довгоживучого ключа
+
+Джоба `deploy` (`ci-deploy.yml`) — єдина, що має `permissions: id-token: write` (на **джобі**, не на файлі). Перший її крок — `scripts/oidc-gate.mjs`:
+бере discovery з `iss` (`/.well-known/openid-configuration`, `issuer` мусить збігтися), іде за `jwks_uri`, **перевіряє підпис RS256** публічним ключем за
+`kid`, звіряє `iss`, `aud`, `sub` і строк дії з файлом `oidc/policy.json` та друкує `iss`, `aud`, `sub` — але не сам токен. Той самий код біжить у `npm run demo:oidc`
+на власноруч підписаних токенах (iss, aud, адреса JWKS і файл умови — параметри).
+
+| Поле `oidc/policy.json` | Значення |
+|---|---|
+| `iss` | `https://token.actions.githubusercontent.com` |
+| `aud` | `marketplace-hw32` (власний audience, токен запитується саме з ним) |
+| `sub` | три **точні** рядки: `…:environment:preview`, `…:environment:staging`, `…:environment:production` |
+
+🔴 Умова на `sub` — єдиний рядок, що відділяє мій репозиторій від чужого: порівняння **точне**, без шаблонів (`*` просто нічого не збігається). Репозиторій створено
+31.08.2026 (після 15.07.2026), тому `sub` має формат з ID: `repo:serhiipelypenko@105488004/node-js-nest-course-project@1352663788:environment:<env>`. Якщо
+гейт відмовить, у лозі є рядок `oidc-sub=…` — це фактичний `sub`, його треба звірити з файлом. Форма `sub` залежить від джоби: з `environment:` це
+`…:environment:<ім'я>` (умова на гілку для такої джоби не спрацює). `npm run demo:oidc` показує випадки `green` (1 1), `foreign-sub` (1 0 — підпис
+і aud коректні, sub чужий), `bad-signature` (0 0) і додатково `unsigned`, `wrong-aud`.
+
+### Середовища і куди деплоїться
+
+| Середовище | Воркфлоу | Що відбувається | `sub` токена |
+|---|---|---|---|
+| `preview` | `pr.yml` | kind у раннері, `pulumi up`, `demo:rollout` (поріг умови злиття) | `…:environment:preview` |
+| `staging` | `deploy.yml` | те саме з `demo:rollout`, після злиття в `main` | `…:environment:staging` |
+| `production` | `deploy.yml` | той самий digest, `pulumi up` + смоук без вимірювання | `…:environment:production` |
+
+Усі цілі — ефемерні kind-кластери (хмарного акаунта немає); середовища GitHub потрібні як окремі `sub` і як місце для required reviewers / wait timer.
+Branch protection захищає гілку, environment protection захищає середовище — перше не замінює другого.
+Файловий бекенд Pulumi (`file://…/.pulumi`): конвеєр не логіниться ні в який акаунт Pulumi. Ніяких `kubectl apply -f`: у кластер усе їде `pulumi up`.
+
+### Два набори секретів
+
+**Секрети конвеєра** — доступ до реєстру й хмари — не живуть ніде: реєстр відкриває `GITHUB_TOKEN` з `packages: write|read` на час джоби, хмари немає
+(OIDC-гейт). **Секрети застосунку** (`APP_DB_PASSWORD`) у конвеєрі — одноразове випадкове значення, згенероване на джобі, потрапляє в K8s Secret і в под через
+`secretKeyRef`; у `deployment.json` самого значення немає (`secret-in-manifest=0`). У GitHub Secrets немає жодного значення, яке відкриває хмару або реєстр,
+а доступу до сховища з #11 конвеєр не потребує — тож repo secrets для нього **немає взагалі** (єдине імʼя з `${{ secrets.… }}`, окрім `GITHUB_TOKEN`, — Pact нижче).
+
+| Імʼя (`${{ secrets.X }}`) | Де читається | Навіщо |
+|---|---|---|
+| `GITHUB_TOKEN` | `ci-build.yml`, `ci-deploy.yml` | вбудований токен прогону: `docker login` у GHCR (`packages: write` на збірці, `read` на сканері й деплої). Не довгоживучий, видається на час джоби |
+| `PACT_BROKER_TOKEN` | `contract.yml` (лише `push` у `main`/dispatch) | токен **локального** Pact Broker, який піднімає сама джоба (hw-16); не відкриває ні хмару, ні реєстр |
+
+Змінні репозиторію (`vars.*`, не секрети): `SCAN_MAX` (поріг сканера, за замовчуванням 10), `COST_BUDGET_USD` (приріст місячної вартості, за замовчуванням 10),
+`HW31_TEARDOWN_ROLE_ARN`, `HW31_STATE_BUCKET` (лише `teardown.yml`).
+
+| Змінна | Джерело | Навіщо |
+|---|---|---|
+| `APP_DB_PASSWORD` | сховище (#11); у конвеєрі — одноразове значення з `openssl rand` | пароль до БД: програма Pulumi кладе його в K8s Secret, Deployment бере через `secretKeyRef` |
+| `PULUMI_CONFIG_PASSPHRASE` | сховище (#11); у конвеєрі — порожній рядок | ключ шифрування стану Pulumi (файловий бекенд на раннері) |
+
+Нового `.env` немає: значення приходять через `scripts/with-secrets.sh` (`SKIP_VAULT=1` — з оточення, так робить і конвеєр, і грейдер).
+
+#### Де проходить межа маскування
+
+Маскування — не захист. Раннер замінює на `***` лише **точне входження** зареєстрованого значення (`::add-mask::` або `secrets.*`). Воно не знає, що значення
+перекодували (base64, hex, URL-кодування), розрізали на частини, або віддали інструменту, який надрукує його по-своєму (`kubectl get secret -o yaml` покаже
+base64 — це вже інший рядок, і маска його не впізнає; `docker inspect`, `env`, `set -x` друкують усе як є). Тому в конвеєрі немає жодного місця, де секрет
+друкується: жодного `echo "$SECRET"`, `env`, `printenv`, `set -x` у кроці, що бачить секрет; значення потрапляє лише у файл `$GITHUB_ENV` і в змінні оточення кроків;
+OIDC-токен нікуди не виводиться (друкуються лише `iss`/`aud`/`sub`); у `deployment.json` секрет — лише посилання. `secret-in-manifest` рахує входження значення (текстом і в base64)
+там, де значення відоме — на раннері, а в артефакт їде число. Це шосте місце витоку секрета з hw-11 (git-історія, лог застосунку, шар образу, `docker inspect`,
+`docker history` — і логи конвеєра); перші п'ять закриті на hw-11, шосте закрито тут.
+
+### Гейт вартості
+
+`pulumi preview --json` (джоба `plan`, у PR) → `plan.json` → `src/mapping.ts` рахує гроші → `npm run gate:cost` виходить кодом 1, якщо приріст місячної вартості більший за
+`COST_BUDGET_USD` (за замовчуванням $10) **або** (коли є база) більший за `COST_BUDGET_PCT` (20 %). Гейт реагує на **зміну** (create: +нова; update/replace: нова − стара;
+delete: −стара), а не на абсолютну суму: абсолютний ліміт ламається на першому ж дорогому ресурсі. Обхід — іменний лейбл PR, назва — у рядку `cost-gate-bypass-label`
+вище: воркфлоу друкує вердикт (`gate=fail`), потім, якщо лейбл стоїть, перетворює його на `::warning::`. Бекенд стану тимчасовий, тож у PR база порожня й приріст = уся
+вартість плану (гілка `update/replace` перевірена вручну на штучному плані).
+
+Kubernetes у kind сам нічого не коштує, тому `mapping.ts` рахує те, що коштувало б у хмарі: `resources.requests` (`cpu`, `memory`) контейнерів × `replicas`
+за ставками керованого контейнерного обчислення. Перевіряється механіка гейта, а не точність прайс-листа.
+
+| Ресурс | Ставка в `mapping.ts` | Джерело |
+|---|---|---|
+| vCPU (`requests.cpu`) | $0,04048 / vCPU-год × 730 год = **$29,55** / vCPU-міс | AWS Fargate, Linux/x86, us-east-1 — https://aws.amazon.com/fargate/pricing/ |
+| памʼять (`requests.memory`) | $0,004445 / ГіБ-год × 730 год = **$3,24** / ГіБ-міс | там само |
+
+Усе інше (Namespace, Secret, Service, PDB, HPA) — $0. Для трьох реплік по `50m` / `48Mi` це ≈ **$4,89**/міс.
+
+### Рішення, яких не було в постановці
+
+- **Один конвеєр на PR.** Єдиний воркфлоу, що біжить на `pull_request`, — `pr.yml` (див. вище про `contract.yml`).
+- **`plan` без кластера.** `pulumi preview` у PR не потребує kind: провайдер Kubernetes на недосяжному кластері дає попередження й показує create усіх ресурсів (перевірено локально).
+- **Лінтер охоплює нове й ключове** (`service/`, `src/mapping.ts`, `src/gate-cost.ts`, `scripts/`, `demo/`), не весь Nest-моноліт; для нього типову перевірку дає `tsc`. `scripts/scan.mjs`
+  лише позбувся чотирьох невикористаних імпортів (поведінка не змінилась).
+- **Токен приватного реєстру npm** для етапу збірки — приманка `ci-build-placeholder` (реєстр у курсі публічний): ключів у секретах репозиторію немає.
+- **Branch protection** (required checks) налаштовується в Settings → Rules, не в YAML. Імена перевірок: `ci / actionlint`, `ci / types`, `ci / contract`, `ci / arch`, `ci / build`,
+  `ci / scan`, `ci / plan`, `deploy / deploy`.
+- **Не перевірено локально** (потрібен справжній прогін на GitHub): видача OIDC-токена, `docker login` у GHCR, кеш збірки `type=gha`, `ctr images pull` у вузлі kind, тривалість `demo:rollout` на раннері.
+
 ## Grading
 
 Грейдер клонує репозиторій начисто і не має доступу до сховища
@@ -2345,6 +2506,32 @@ done                                                                            
 Решта критеріїв (A2–A4, B1–B3, C1–C3, D1–D4) читаються дослівно з `task.md` по `evidence/*.txt|json`, `infra/*/stack.ts`, `.github/workflows/teardown.yml`
 і кореневому `package.json`. Скрипти `up:base`, `up:demo`, `destroy:demo`, `destroy:base`, `demo:failover`, `demo:nat`, `demo:alb` — усі через
 `scripts/with-secrets.sh`; **у грейдера їх запускати не треба** (вони створюють платні ресурси в чужому акаунті).
+
+### hw-32 (CI/CD: конвеєр як набір гейтів)
+
+Хмарного акаунта не треба. Локальні демо **не ходять у GitHub і не потребують кластера** (для `demo:gates` потрібен лише `docker` — образ `tufin/oasdiff`).
+Сховища у грейдера нема — `SKIP_VAULT=1`, значення через `export` (змінні — з таблиці розділу [CI/CD](#cicd)).
+
+```bash
+git clone <репозиторій> && cd <репо> && git checkout hw-32
+
+npm ci
+
+export SKIP_VAULT=1                     # у грейдера немає доступу до сховища
+export APP_DB_PASSWORD=grader-secret
+
+npm run demo:gates                      # чотири сходинки, обидва боки: <сходинка>-ok=0, <сходинка>-broken≠0
+npm run demo:oidc                       # case=green 1 1 · foreign-sub 1 0 · bad-signature 0 0
+
+PLAN_JSON=/tmp/hw32/plan.json COST_BUDGET_USD=0      npm run gate:cost   # gate=fail, exit ≠ 0
+PLAN_JSON=/tmp/hw32/plan.json COST_BUDGET_USD=999999 npm run gate:cost   # gate=pass, exit 0, plan-usd > 0
+```
+
+`plan.json` береться з артефакту прогону (`gh run download "$RUN_ID" -R "$REPO" -n pipeline-evidence -D /tmp/hw32`), у репозиторій його не комічено.
+Артефакт `pipeline-evidence` (`evidence.txt`, `deployment.json`, `plan.json`, `rollout.txt`, `build.log`) вивантажується кроком `upload-artifact` з `if: always()`.
+Критерії 1–3, 7 і 10 (статичні частини) читаються з `.github/workflows/*`: `actionlint` (`docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.12`),
+усі `uses:` запінені за SHA, `id-token: write` лише на джобах, місце збірки образу — рівно одне. Реєстр — GHCR; пакет `marketplace-api` треба зробити **публічним**
+(інакше критерій 5 перевіряється тільки за артефактом).
 
 ## Перевірка спеки (acceptance criteria, пункти 1-4)
 

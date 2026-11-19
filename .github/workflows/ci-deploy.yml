@@ -1,0 +1,139 @@
+# hw-32: деплой образу ЗА DIGEST у kind усередині раннера Pulumi-програмою з #28 і вимір «нуль невдалих відповідей».
+# Reusable workflow: pr.yml викликає його для середовища preview, deploy.yml — для staging і production.
+#
+#   OIDC-гейт (підпис + iss/aud/sub) ─► kind ─► образ у вузол за digest ─► pulumi up ─► deployment.json
+#                                                                          └─► demo:rollout (failed ≠ 0 → джоба червона)
+#
+# id-token: write — НА ДЖОБІ, не на файлі: токен від імені репозиторію потрібен рівно цій джобі.
+# Хмари тут немає: гейт сам вирішує, пускати джобу далі чи ні (варіант «без хмари» із ДЗ).
+name: ci-deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: preview | staging | production (від нього залежить sub токена)
+        required: true
+        type: string
+      image:
+        description: ім'я образу без тега й digest
+        required: true
+        type: string
+      digest:
+        description: sha256:… з output джоби збірки (деплоїться він, а не тег)
+        required: true
+        type: string
+      rollout:
+        description: чи ганяти demo:rollout (гейт «нуль збоїв»)
+        required: false
+        type: boolean
+        default: true
+      min-requests:
+        description: поріг обсягу вимірювання (на раннері нижчий, ніж 5000 з #28; failed=0 лишається жорстким)
+        required: false
+        type: number
+        default: 2000
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: read     # kind тягне образ із реєстру токеном GITHUB_TOKEN
+      id-token: write    # лише ця джоба може попросити OIDC-токен
+    env:
+      SKIP_VAULT: "1"                 # у конвеєрі немає сховища: значення застосунку одноразове, зі змінної оточення
+      PULUMI_CONFIG_PASSPHRASE: ""    # порожня, але ЗАДАНА: стан — файл на цьому ж раннері
+      IMAGE_REF: ${{ inputs.image }}@${{ inputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          infra: "true"
+
+      - name: OIDC-гейт — підпис по jwks_uri, iss/aud/sub з oidc/policy.json
+        id: oidc
+        run: |
+          mkdir -p out
+          node scripts/oidc-gate.mjs --policy oidc/policy.json --github-output "$GITHUB_OUTPUT" | tee out/oidc.txt
+
+      - uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+
+      - name: секрет застосунку (одноразовий; у GitHub Secrets значень застосунку немає)
+        run: |
+          secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$secret"
+          echo "APP_DB_PASSWORD=$secret" >> "$GITHUB_ENV"
+
+      - name: "kind — один кластер, бо пам'яті на раннері менше, ніж на ноутбуці"
+        run: kind create cluster --config k8s/kind-config.yaml --wait 120s
+
+      - name: образ у вузол kind — рівно той digest, що зібрала збірка
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci/kind-pull.sh "$IMAGE_REF"
+
+      - name: pulumi up (стан — файловий бекенд, акаунта Pulumi немає)
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          bash scripts/pulumi.sh config set image "$IMAGE_REF"
+          bash scripts/pulumi.sh config set rev "$DIGEST"
+          npm run -s up
+
+      - name: deployment.json і перевірка digest, який поїхав
+        env:
+          EXPECTED: ${{ inputs.digest }}
+          OIDC_ISS: ${{ steps.oidc.outputs.oidc-iss }}
+          OIDC_AUD: ${{ steps.oidc.outputs.oidc-aud }}
+          OIDC_SUB: ${{ steps.oidc.outputs.oidc-sub }}
+          OIDC_SIG: ${{ steps.oidc.outputs.oidc-sig-verified }}
+        run: |
+          kubectl --context kind-hw28 -n marketplace get deploy marketplace-api -o json > out/deployment.json
+          deployed="$(node -e 'const i=require("./out/deployment.json").spec.template.spec.containers[0].image;console.log(i.split("@")[1]||"")')"
+          running="$(kubectl --context kind-hw28 -n marketplace get pods -l app=marketplace-api -o jsonpath='{.items[0].status.containerStatuses[0].imageID}')"
+          echo "deployed-digest=$deployed"
+          echo "running-digest=${running##*@}"
+          [ "$deployed" = "$EXPECTED" ] || { echo "::error::у кластер поїхав не той digest"; exit 1; }
+          {
+            echo "running-digest=${running##*@}"
+            echo "secret-in-manifest=$(node scripts/ci/count-secret.mjs out/deployment.json)"
+            echo "oidc-iss=$OIDC_ISS"
+            echo "oidc-aud=$OIDC_AUD"
+            echo "oidc-sub=$OIDC_SUB"
+            echo "oidc-sig-verified=$OIDC_SIG"
+          } > out/deploy.txt
+
+      - name: demo:rollout — failed ≠ 0 робить джобу червоною, а PR — незливним
+        if: inputs.rollout
+        env:
+          MIN_REQUESTS: ${{ inputs.min-requests }}
+        run: npm run -s demo:rollout | tee out/rollout.txt
+
+      - name: смоук (без rollout) — сервіс відповідає 200
+        if: ${{ !inputs.rollout }}
+        run: curl -fsS --retry 10 --retry-delay 2 --retry-connrefused -o /dev/null http://127.0.0.1:22880/
+
+      - name: діагностика кластера
+        if: failure()
+        run: |
+          kubectl --context kind-hw28 get pods -A -o wide || true
+          kubectl --context kind-hw28 -n marketplace describe deploy marketplace-api | tail -40 || true
+          kubectl --context kind-hw28 -n marketplace get events --sort-by=.lastTimestamp | tail -25 || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-part-${{ inputs.environment }}
+          path: out/
+          if-no-files-found: ignore
