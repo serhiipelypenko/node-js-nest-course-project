@@ -1,0 +1,9 @@
+{
+  "iss": "https://token.actions.githubusercontent.com",
+  "aud": "marketplace-hw32",
+  "sub": [
+    "repo:serhiipelypenko@105488004/node-js-nest-course-project@1352663788:environment:preview",
+    "repo:serhiipelypenko@105488004/node-js-nest-course-project@1352663788:environment:staging",
+    "repo:serhiipelypenko@105488004/node-js-nest-course-project@1352663788:environment:production"
+  ]
+}

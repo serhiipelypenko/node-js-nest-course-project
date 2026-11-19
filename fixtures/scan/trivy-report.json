@@ -1,0 +1,21 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "marketplace-api:fixture",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "marketplace-api:fixture (debian 12.13)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Vulnerabilities": [
+        { "VulnerabilityID": "CVE-0000-0001", "PkgName": "libssl3", "Severity": "CRITICAL", "FixedVersion": "3.0.99" },
+        { "VulnerabilityID": "CVE-0000-0002", "PkgName": "libc6", "Severity": "HIGH", "FixedVersion": "2.36-9+deb12u99" },
+        { "VulnerabilityID": "CVE-0000-0003", "PkgName": "libc6", "Severity": "HIGH", "FixedVersion": "2.36-9+deb12u99" },
+        { "VulnerabilityID": "CVE-0000-0004", "PkgName": "zlib1g", "Severity": "HIGH", "FixedVersion": "1:1.2.13.dfsg-1+deb12u9" },
+        { "VulnerabilityID": "CVE-0000-0005", "PkgName": "libexpat1", "Severity": "HIGH", "FixedVersion": "2.5.0-1+deb12u9" },
+        { "VulnerabilityID": "CVE-0000-0006", "PkgName": "libsqlite3-0", "Severity": "HIGH", "FixedVersion": "3.40.1-2+deb12u9" },
+        { "VulnerabilityID": "CVE-0000-0007", "PkgName": "tzdata", "Severity": "LOW", "FixedVersion": "2025a" }
+      ]
+    }
+  ]
+}

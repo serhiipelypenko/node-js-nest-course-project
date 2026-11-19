@@ -11,9 +11,7 @@
 // SCAN_MAX (робочий поріг нижче), SCAN_IGNORE_UNFIXED (1 — рахуємо лише знахідки з
 // виправленням), SCAN_REPORT (готовий JSON-звіт trivy замість запуску сканера).
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const TRIVY_IMAGE = 'aquasec/trivy:0.74.0';
 const CACHE_VOLUME = 'hw28-trivy-cache';

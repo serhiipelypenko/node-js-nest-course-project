@@ -1,0 +1,24 @@
+name: setup
+description: Node 22 + npm ci з кешем за lock-файлами (кеш прискорює повторний прогін, артефакт між джобами — окрема річ)
+inputs:
+  infra:
+    description: "true — додатково npm ci в infra/ (Pulumi-програма)"
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: |
+          package-lock.json
+          infra/package-lock.json
+    - name: npm ci
+      shell: bash
+      run: npm ci --no-audit --no-fund
+    - name: npm ci (infra)
+      if: inputs.infra == 'true'
+      shell: bash
+      run: npm --prefix infra ci --no-audit --no-fund
