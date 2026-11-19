@@ -1,0 +1,2 @@
+sim-allowed=allowed
+sim-denied=implicitDeny

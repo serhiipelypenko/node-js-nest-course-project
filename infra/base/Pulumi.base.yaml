@@ -1,0 +1,15 @@
+config:
+  # Регіон фіксуємо тут, а не в ~/.aws/config: стек не в тому регіоні дає чесний нуль у перевірках знесення.
+  aws:region: eu-central-1
+  aws:defaultTags:
+    tags:
+      Project: nodejs-pro-hw31
+      Stack: base
+      ManagedBy: pulumi
+  hw31:azs:
+    - eu-central-1a
+    - eu-central-1b
+  hw31:githubRepo: serhiipelypenko/node-js-nest-course-project
+  # hw31:budgetEmail і hw31:stateBucket сюди не пишемо (пошта — приватна, бакет залежить від акаунта):
+  # їх підставляють HW31_BUDGET_EMAIL / HW31_STATE_BUCKET із оточення (сховище → with-secrets.sh).
+encryptionsalt: v1:o166D6VVThM=:v1:jyucHym1A9SC+x2p:braEm+WS/6+bHpoaRMDXX/Pdg410LQ==
