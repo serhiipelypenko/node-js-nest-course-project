@@ -44,12 +44,20 @@ function unwrapReturning<T>(result: unknown): T[] {
     : (result as T[]);
 }
 
-export type CheckoutFailureReason = 'out_of_stock' | 'insufficient_funds';
+export type CheckoutFailureReason = 'out_of_stock' | 'insufficient_funds' | 'product_not_found';
+
+export interface CheckoutLine {
+  productId: string;
+  quantity: number;
+}
 
 export interface CheckoutParams {
   buyerId: string;
-  productId: string;
-  quantity: number;
+  // Одна позиція (hw-14..22) АБО кілька (HTTP-контур курсового). Якщо задано
+  // `items`, productId/quantity ігноруються.
+  productId?: string;
+  quantity?: number;
+  items?: CheckoutLine[];
   // hw-22, рівень 3: ключ ідентифікує НАМІР клієнта (одна спроба «купити»), а не
   // байти тіла. Хеш тіла схлопнув би два легітимні однакові замовлення в одне.
   idempotencyKey?: string;
@@ -73,9 +81,20 @@ export type CheckoutResult = CheckoutSuccess | CheckoutFailure;
 
 export async function checkout(
   dataSource: DataSource,
-  { buyerId, productId, quantity, idempotencyKey }: CheckoutParams,
+  { buyerId, productId, quantity, items, idempotencyKey }: CheckoutParams,
   hooks: CheckoutHooks = {},
 ): Promise<CheckoutResult> {
+  // Нормалізуємо до списку позицій і зводимо дублікати товару в одну. Сортуємо
+  // за числовим id: усі конкурентні checkout() беруть локи на products в ОДНОМУ
+  // порядку — інакше два кошики з товарами {1,2} і {2,1} дали б deadlock 40P01.
+  const merged = new Map<string, number>();
+  for (const l of items ?? [{ productId: productId!, quantity: quantity! }]) {
+    merged.set(l.productId, (merged.get(l.productId) ?? 0) + l.quantity);
+  }
+  const lines: CheckoutLine[] = [...merged]
+    .map(([pid, q]) => ({ productId: pid, quantity: q }))
+    .sort((a, b) => (BigInt(a.productId) < BigInt(b.productId) ? -1 : BigInt(a.productId) > BigInt(b.productId) ? 1 : 0));
+
   const qr = dataSource.createQueryRunner();
   await qr.connect();
   await qr.startTransaction(); // READ COMMITTED (дефолт) — достатньо: атомарність дає сам UPDATE, не рівень ізоляції
@@ -110,20 +129,29 @@ export async function checkout(
     }
 
     // 1) склад: атомарний декремент з перевіркою достатності в тому самому statement
-    const stockRows = unwrapReturning<{ price: string }>(
-      await qr.query(
-        `UPDATE products SET stock = stock - $1
-         WHERE id = $2 AND stock >= $1
-         RETURNING price`,
-        [quantity, productId],
-      ),
-    );
-    if (stockRows.length === 0) {
-      await qr.rollbackTransaction();
-      return { ok: false, reason: 'out_of_stock' };
+    const priced: Array<CheckoutLine & { unitPrice: number }> = [];
+    let totalAmount = 0;
+    for (const line of lines) {
+      const stockRows = unwrapReturning<{ price: string }>(
+        await qr.query(
+          `UPDATE products SET stock = stock - $1
+           WHERE id = $2 AND stock >= $1
+           RETURNING price`,
+          [line.quantity, line.productId],
+        ),
+      );
+      if (stockRows.length === 0) {
+        // Нестача відкочує ВСЮ транзакцію (раніші позиції теж). Причину
+        // розрізняємо вже після відкату: чи є такий товар узагалі.
+        await qr.rollbackTransaction();
+        const exists = await dataSource.query(`SELECT 1 FROM products WHERE id = $1`, [line.productId]);
+        return { ok: false, reason: exists.length === 0 ? 'product_not_found' : 'out_of_stock' };
+      }
+      const unitPrice = Number(stockRows[0].price);
+      priced.push({ ...line, unitPrice });
+      totalAmount += unitPrice * line.quantity;
     }
-    const unitPrice = Number(stockRows[0].price);
-    const totalAmount = unitPrice * quantity;
+    totalAmount = Math.round(totalAmount * 100) / 100;
 
     // 2) баланс покупця: та сама атомарна форма
     const balanceRows = unwrapReturning<{ balance: string }>(
@@ -154,11 +182,13 @@ export async function checkout(
     );
     const orderId = orderRows[0]!.id;
 
-    await qr.query(
-      `INSERT INTO order_items (order_id, product_id, quantity, unit_price)
-       VALUES ($1, $2, $3, $4)`,
-      [orderId, productId, quantity, unitPrice],
-    );
+    for (const line of priced) {
+      await qr.query(
+        `INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)`,
+        [orderId, line.productId, line.quantity, line.unitPrice],
+      );
+    }
 
     // 4) задача на post-processing (лист/чек) — у ЦІЙ ЖЕ транзакції: якщо
     // checkout відкотиться, "сирітської" задачі без замовлення не буде;
@@ -181,8 +211,9 @@ export async function checkout(
     const event = toOrderPlacedEvent({
       id: orderId,
       buyerId,
-      productId,
-      quantity,
+      productId: priced[0]!.productId,
+      quantity: priced[0]!.quantity,
+      items: priced.length > 1 ? priced.map(({ productId: pid, quantity: q }) => ({ productId: pid, quantity: q })) : undefined,
       totalAmount,
       placedAt: new Date(),
     });

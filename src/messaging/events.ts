@@ -13,6 +13,11 @@ export const OrderPlacedSchema = z.object({
     buyerId: z.string().min(1),
     productId: z.string().min(1),
     quantity: z.number().int().positive(),
+    // Курсовий: кошик із кількох позицій. productId/quantity лишаються = першою
+    // позицією (старі консюмери не ламаються); повний склад — тут. Лише додавання.
+    items: z
+      .array(z.object({ productId: z.string().min(1), quantity: z.number().int().positive() }))
+      .optional(),
     totalAmount: z.number().nonnegative(),
   }),
 });
@@ -49,6 +54,7 @@ export function toOrderPlacedEvent(order: {
   buyerId: string;
   productId: string;
   quantity: number;
+  items?: Array<{ productId: string; quantity: number }>;
   totalAmount: number;
   placedAt: Date;
 }): OrderPlacedEvent {
@@ -61,6 +67,7 @@ export function toOrderPlacedEvent(order: {
       buyerId: order.buyerId,
       productId: order.productId,
       quantity: order.quantity,
+      ...(order.items ? { items: order.items } : {}),
       totalAmount: order.totalAmount,
     },
   };

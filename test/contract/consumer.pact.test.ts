@@ -19,25 +19,25 @@ describe('Pact consumer · marketplace-web описує очікування в�
     dir: path.resolve(__dirname, '..', '..', 'pacts'),
   });
 
-  test('GET /products/p1 за стану "product p1 exists"', async () => {
+  test('GET /products/1 за стану "product 1 exists"', async () => {
     provider
-      .given('product p1 exists')
-      .uponReceiving('запит товару p1')
-      .withRequest({ method: 'GET', path: '/products/p1' })
+      .given('product 1 exists')
+      .uponReceiving('запит товару 1')
+      .withRequest({ method: 'GET', path: '/products/1' })
       .willRespondWith({
         status: 200,
         headers: {
           'Content-Type': regex('application/json.*', 'application/json; charset=utf-8'),
         },
         body: {
-          id: like('p1'),
+          id: like('1'),
           name: like('Клавіатура механічна'),
           price_cents: like(129900),
         },
       });
 
     await provider.executeTest(async (mockServer) => {
-      const res = await fetch(`${mockServer.url}/products/p1`);
+      const res = await fetch(`${mockServer.url}/products/1`);
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({

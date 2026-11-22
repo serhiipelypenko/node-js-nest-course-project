@@ -138,13 +138,22 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '201':
-          description: Замовлення створено
+          description: >
+            Замовлення створено. Повтор із тим самим Idempotency-Key віддає те
+            саме замовлення (теж 201) із заголовком Idempotent-Replayed: true —
+            другого списання й другої події немає.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /orders/{id}:
     get:
       operationId: getOrder
@@ -319,7 +328,7 @@ components:
       properties:
         id:
           type: string
-          example: p1
+          example: '1'
         name:
           type: string
           example: Клавіатура механічна
@@ -327,6 +336,11 @@ components:
           type: integer
           description: Ціна в копійках — без float.
           example: 129900
+        stock:
+          type: integer
+          minimum: 0
+          description: Залишок на складі; checkout списує його атомарно.
+          example: 10
     ProductPage:
       type: object
       required: [items, next_cursor]
@@ -346,7 +360,7 @@ components:
       properties:
         product_id:
           type: string
-          example: p1
+          example: '1'
         quantity:
           type: integer
           minimum: 1
@@ -357,14 +371,14 @@ components:
       properties:
         id:
           type: string
-          example: o1
+          example: '1'
         buyer_id:
           type: string
           description: >
             Власник замовлення (id користувача з access-токена, hw-24).
             Використовує WS-gateway (hw-18) для перевірки на join у кімнату
             orders/{id} — анонімному або чужому клієнту відмовляє.
-          example: u1
+          example: '7'
         items:
           type: array
           minItems: 1
@@ -411,7 +425,7 @@ components:
             hw-24: ІГНОРУЄТЬСЯ. Власник замовлення — це sub із access-токена;
             довіряти полю з тіла означало б дозволити створювати замовлення
             від чужого імені.
-          example: u1
+          example: '7'
     UpdateOrderStatusRequest:
       type: object
       required: [status]
@@ -432,6 +446,12 @@ components:
           type: integer
           minimum: 0
           example: 99900
+        stock:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Початковий залишок. Товар із нульовим залишком у каталозі є, але купити його не можна.
+          example: 10
     LoginRequest:
       type: object
       required: [email, password]
@@ -501,6 +521,14 @@ components:
             $ref: '#/components/schemas/Problem'
     NotFound:
       description: Ресурс не знайдено
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: >
+        Бізнес-правило не дозволяє операцію: товару не вистачає на складі або
+        недостатньо коштів. Транзакція відкочена цілком — нічого не списано.
       content:
         application/problem+json:
           schema:

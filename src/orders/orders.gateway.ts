@@ -81,7 +81,7 @@ export class OrdersGateway implements OnGatewayConnection, OnModuleInit, OnModul
     const user = await (client.data.user as Promise<AuthUser | undefined>);
     let ownerId: string;
     try {
-      ownerId = this.orders.getById(orderId).buyer_id;
+      ownerId = (await this.orders.getById(orderId)).buyer_id;
     } catch {
       return { event: 'joined', data: { ok: false, reason: 'not-found' } };
     }

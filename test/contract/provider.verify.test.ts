@@ -27,10 +27,9 @@ const BROKER_TOKEN = process.env.PACT_BROKER_TOKEN;
  *    true (той самий виклик, яким користується CI-джоба contract і локальний
  *    гейт can-i-deploy у README).
  *
- * stateHandlers тут НЕ сідять БД: products/orders цього API,
- * товар "p1" завжди присутній у каталозі за задумом hw-09.
- * pg піднімається все одно — DatabaseModule (DB_URL/DB_PASSWORD_FILE) має
- * бути справжнім, щоб DI-граф збирався так само, як у проді.
+ * Каталог — у Postgres, тож stateHandler СІЄ потрібний стан: «product 1
+ * exists» вставляє товар з id=1 (OVERRIDING SYSTEM VALUE — id у схемі
+ * GENERATED ALWAYS) на чисту базу тестового контейнера.
  */
 describe('Pact provider verification · marketplace-api проти контракту', () => {
   let pg: PgHandle;
@@ -60,8 +59,12 @@ describe('Pact provider verification · marketplace-api проти контра�
 
   test(`усі взаємодії контракту пройдено${BROKER_URL ? ' (з брокера)' : ' (локальний файл)'}`, async () => {
     const stateHandlers = {
-      'product p1 exists': async () => {
-        // no-op: каталог in-memory (src/products/products.service.ts) — p1 у ньому завжди є.
+      'product 1 exists': async () => {
+        await pg.pool.query(`DELETE FROM products WHERE id = 1`);
+        await pg.pool.query(
+          `INSERT INTO products (id, sku, name, price, stock) OVERRIDING SYSTEM VALUE
+           VALUES (1, 'pact-1', 'Клавіатура механічна', 1299.00, 10)`,
+        );
       },
     };
 

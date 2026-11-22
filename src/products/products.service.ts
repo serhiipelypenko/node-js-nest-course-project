@@ -1,43 +1,61 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { Page, paginate } from '../common/cursor';
+import { randomUUID } from 'node:crypto';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { Pool } from 'pg';
+import { decodeKeyCursor, keysetPage, Page } from '../common/cursor';
+import { PG_POOL } from '../database/database.module';
 
 export interface Product {
   id: string;
   name: string;
   price_cents: number;
+  stock: number;
 }
 
-const PRODUCTS: Product[] = [
-  { id: 'p1', name: 'Клавіатура механічна', price_cents: 129900 },
-  { id: 'p2', name: 'Мишка бездротова', price_cents: 45900 },
-  { id: 'p3', name: 'Килимок для миші', price_cents: 12900 },
-  { id: 'p4', name: 'Монітор 27"', price_cents: 899900 },
-  { id: 'p5', name: 'Навушники', price_cents: 219900 },
-];
+// Каталог живе в таблиці products (hw-12/13). API говорить у копійках (integer,
+// без float), БД зберігає numeric(12,2): перерахунок робить SQL, а не JS —
+// `round(price * 100)` на numeric точний.
+const COLUMNS = `id::text AS id, name, round(price * 100)::int AS price_cents, stock`;
 
-let nextId = 6;
+// Ідентифікатор у шляху — bigint. Не-число ніколи не доходить до SQL (інакше
+// Postgres відповів би 22P02 -> 500), а чесно дає 404.
+export function isDbId(id: string): boolean {
+  return /^\d{1,18}$/.test(id);
+}
 
 @Injectable()
 export class ProductsService {
-  list(limit: number, cursor?: string): Page<Product> {
-    return paginate(PRODUCTS, limit, cursor);
+  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+
+  async list(limit: number, cursor?: string): Promise<Page<Product>> {
+    const after = cursor ? decodeKeyCursor(cursor) : '0';
+    const { rows } = await this.pool.query<Product>(
+      `SELECT ${COLUMNS} FROM products
+       WHERE is_active AND id > $1
+       ORDER BY id
+       LIMIT $2`,
+      [after, limit + 1],
+    );
+    return keysetPage(rows, limit);
   }
 
-  getById(id: string): Product {
-    const product = PRODUCTS.find((p) => p.id === id);
-    if (!product) {
+  async getById(id: string): Promise<Product> {
+    const rows = isDbId(id)
+      ? (await this.pool.query<Product>(`SELECT ${COLUMNS} FROM products WHERE id = $1`, [id])).rows
+      : [];
+    if (rows.length === 0) {
       throw new NotFoundException({ detail: `товар "${id}" не знайдено` });
     }
-    return product;
+    return rows[0]!;
   }
 
-  findByIds(ids: string[]): Product[] {
-    return PRODUCTS.filter((p) => ids.includes(p.id));
-  }
-
-  create(name: string, priceCents: number): Product {
-    const product: Product = { id: `p${nextId++}`, name, price_cents: priceCents };
-    PRODUCTS.push(product);
-    return product;
+  async create(name: string, priceCents: number, stock = 0): Promise<Product> {
+    // sku — NOT NULL UNIQUE у схемі; для товару з API генеруємо його сервером.
+    const { rows } = await this.pool.query<Product>(
+      `INSERT INTO products (sku, name, price, stock)
+       VALUES ($1, $2, $3::numeric / 100, $4)
+       RETURNING ${COLUMNS}`,
+      [`api-${randomUUID()}`, name, priceCents, stock],
+    );
+    return rows[0]!;
   }
 }

@@ -14,14 +14,18 @@ import { User } from './user.entity';
 export type OrderStatus =
   | 'pending'
   | 'paid'
+  | 'packed'
   | 'shipped'
+  | 'delivered'
   | 'cancelled'
   | 'refunded';
 
 export const ORDER_STATUSES: readonly OrderStatus[] = [
   'pending',
   'paid',
+  'packed',
   'shipped',
+  'delivered',
   'cancelled',
   'refunded',
 ];
@@ -30,7 +34,7 @@ export const ORDER_STATUSES: readonly OrderStatus[] = [
 // замовлення (як у db/schema.sql: користувач міг згодом змінити email, а
 // замовлення лишається з тим, на який його оформили).
 @Entity('orders')
-@Check(`"status" IN ('pending', 'paid', 'shipped', 'cancelled', 'refunded')`)
+@Check(`"status" IN ('pending', 'paid', 'packed', 'shipped', 'delivered', 'cancelled', 'refunded')`)
 @Check('"total_amount" >= 0')
 export class Order {
   @PrimaryGeneratedColumn('identity', {

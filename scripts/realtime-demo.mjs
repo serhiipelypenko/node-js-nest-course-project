@@ -19,7 +19,9 @@ import { io } from 'socket.io-client';
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3000';
 const SAME_ROOM = process.argv.includes('--same-room');
 
-const { ACCESS_A, ACCESS_B, ACCESS_SELLER } = process.env;
+// Каталог у Postgres: PRODUCT_ID — id будь-якого товару з залишком (напр. створеного
+// POST /products зі stock). Дефолт '1' — перший товар після `npm run seed`/Pact-стану.
+const { ACCESS_A, ACCESS_B, ACCESS_SELLER, PRODUCT_ID = '1' } = process.env;
 if (!ACCESS_A || !ACCESS_B || !ACCESS_SELLER) {
   console.error('потрібні ACCESS_A, ACCESS_B, ACCESS_SELLER (access-токени з POST /auth/login)');
   process.exit(1);
@@ -33,7 +35,7 @@ async function createOrder(label, token) {
       authorization: `Bearer ${token}`,
       'idempotency-key': `realtime-demo-${label}-${Date.now()}-${Math.random()}`,
     },
-    body: JSON.stringify({ items: [{ product_id: 'p1', quantity: 1 }] }),
+    body: JSON.stringify({ items: [{ product_id: PRODUCT_ID, quantity: 1 }] }),
   });
   if (!res.ok) {
     throw new Error(`POST /orders (${label}) -> ${res.status} ${await res.text()}`);
