@@ -10,7 +10,6 @@ on:
   schedule: [{ cron: '0 2 * * *' }]
   workflow_dispatch: {}
 permissions:
-  id-token: write      # без цього GitHub не видасть OIDC-токен
   contents: read
 env:
   AWS_REGION: eu-central-1
@@ -22,15 +21,18 @@ jobs:
   teardown:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      id-token: write      # без цього GitHub не видасть OIDC-токен; на ДЖОБІ, не на файлі (hw-32)
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.HW31_TEARDOWN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      - uses: pulumi/actions@v6
+      - uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
       - name: npm ci (infra/demo)
         working-directory: infra/demo
         run: npm ci --no-audit --no-fund

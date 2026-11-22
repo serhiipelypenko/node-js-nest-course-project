@@ -1,0 +1,64 @@
+# hw-32: деплой після злиття в main (і вручну). Той самий набір гейтів, що на PR, потім ПРОСУВАННЯ того самого digest:
+# staging (з demo:rollout) → production. Образ не перезбирається: обидва середовища беруть digest з outputs однієї збірки.
+# Цілі — ефемерні kind-кластери в раннері; середовища GitHub (staging, production) дають їм власний sub в OIDC-токені
+# і місце для required reviewers / wait timer (налаштовується в Settings → Environments, не в YAML).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-build.yml
+    permissions:
+      contents: read
+      packages: write
+
+  staging:
+    needs: ci
+    uses: ./.github/workflows/ci-deploy.yml
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    with:
+      environment: staging
+      image: ${{ needs.ci.outputs.image }}
+      digest: ${{ needs.ci.outputs.digest }}
+
+  production:
+    needs: [ci, staging]
+    uses: ./.github/workflows/ci-deploy.yml
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    with:
+      environment: production
+      image: ${{ needs.ci.outputs.image }}
+      digest: ${{ needs.ci.outputs.digest }}
+      rollout: false   # вимір уже зроблено на staging; тут — той самий digest і смоук
+
+  evidence:
+    needs: [ci, staging, production]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/evidence
+        with:
+          run-id: ${{ github.run_id }}
+          head-sha: ${{ github.sha }}
+          image-ref: ${{ needs.ci.outputs.image-ref }}
+          built-digest: ${{ needs.ci.outputs.digest }}
+          scan-exit: ${{ needs.ci.outputs.scan-exit }}
+          deploy-env: staging

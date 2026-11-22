@@ -2,7 +2,7 @@
   "name": "marketplace-api",
   "version": "1.0.0",
   "private": true,
-  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність); hw-26 (файли: presigned-завантаження повз API, multipart з відновленням, закритий бакет за кеш-шаром, ассети з хешем в імені); hw-31 (AWS core: два стеки Pulumi base/demo, бюджет, VPC, IAM+OIDC, RDS Multi-AZ, ALB, NAT-вимір, нічне знесення з шістьма нулями в CI)",
+  "description": "Marketplace API — курсовий проєкт: hw-09 (OpenAPI-контракт + runtime-валідація), hw-11 (конфіг-скелет + секрети + ротація пароля БД), hw-13 (TypeORM: entities/relations/міграції/seed/N+1/звіт), hw-14 (транзакційний checkout + воркер-пул SKIP LOCKED + retry-патерн), hw-15 (PgBouncer + backup.sh + restore-drill), hw-16 (testcontainers integration suite + supertest E2E + Pact contract/broker/can-i-deploy), hw-24 (автентифікація/авторизація: ES256 JWT, ротація refresh із детекцією повтору, денилист, RBAC + власність); hw-26 (файли: presigned-завантаження повз API, multipart з відновленням, закритий бакет за кеш-шаром, ассети з хешем в імені); hw-31 (AWS core: два стеки Pulumi base/demo, бюджет, VPC, IAM+OIDC, RDS Multi-AZ, ALB, NAT-вимір, нічне знесення з шістьма нулями в CI); hw-32 (CI/CD на GitHub Actions: конвеєр як набір гейтів — типи/контракт/архітектура/образ, збірка раз і деплой за digest, OIDC з перевіркою підпису, rollout і вартість як умови злиття)",
   "scripts": {
     "build": "nest build",
     "start": "npm run build && node dist/main.js",
@@ -71,7 +71,15 @@
     "demo:alb": "bash scripts/with-secrets.sh dev node demo/alb.mjs",
     "evidence:base": "bash scripts/with-secrets.sh dev node scripts/aws-evidence-base.mjs",
     "evidence:iam": "bash scripts/with-secrets.sh dev node scripts/aws-evidence-iam.mjs",
-    "test:infra": "npm --prefix infra/base test && npm --prefix infra/demo test"
+    "test:infra": "npm --prefix infra/base test && npm --prefix infra/demo test",
+    "lint": "eslint service/src src/mapping.ts src/gate-cost.ts scripts demo",
+    "ci:types": "tsc --noEmit -p tsconfig.json && npm run --silent lint",
+    "ci:arch": "depcruise --no-progress --config .dependency-cruiser.cjs src",
+    "ci:contract": "bash scripts/ci/contract.sh",
+    "ci:oidc": "node scripts/oidc-gate.mjs --policy oidc/policy.json",
+    "demo:gates": "node demo/gates.mjs",
+    "demo:oidc": "node demo/oidc.mjs",
+    "gate:cost": "npm run build --silent && node dist/gate-cost.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",
@@ -105,6 +113,7 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@nestjs/cli": "10.4.9",
     "@nestjs/schematics": "10.2.3",
     "@nestjs/testing": "^10.4.22",
@@ -117,9 +126,12 @@
     "@types/node": "22.10.5",
     "@types/pg": "8.11.10",
     "@types/supertest": "^7.2.1",
+    "dependency-cruiser": "^18.8.0",
+    "eslint": "^9.39.5",
     "jest": "^30.5.2",
     "supertest": "^7.3.0",
     "ts-jest": "^29.4.12",
-    "typescript": "5.4.5"
+    "typescript": "5.4.5",
+    "typescript-eslint": "^8.73.0"
   }
 }
