@@ -65,6 +65,18 @@
   `failed=0`; три демо `demo:image` / `demo:rollout` / `demo:pdb` (див. розділ
   [Kubernetes (hw-28)](#kubernetes-hw-28)).
 
+- **hw-29** — observability: pino + `AsyncLocalStorage`, `trace_id` як корелятор, RED-метрики, OTel-трейси,
+  Grafana-дашборд файлом (див. розділ [Observability](#observability)).
+
+- **hw-31** — AWS Core: бюджет першим, VPC, OIDC-роль, RDS Multi-AZ, ALB, нічне знесення з шістьма нулями
+  (див. розділ [AWS](#aws)).
+
+- **hw-32** — CI/CD на GitHub Actions: чотири гейти, збірка один раз, деплой за digest, OIDC без довгоживучих
+  ключів (див. розділ [CI/CD](#cicd)).
+
+- **курсовий** — HTTP-контур на Postgres (checkout + outbox + ідемпотентність), записка для рев'юера,
+  таблиці блоків ТЗ, OWASP (див. розділ [Курсовий проєкт](#курсовий-проєкт-записка-для-ревюера)).
+
 Обраний варіант hw-09: **Б — runtime-валідація на кордоні**.
 
 Стек: NestJS (`@nestjs/core`, `@nestjs/platform-express`) + `express-openapi-validator`,
@@ -75,10 +87,167 @@
 express-обробником помилок валідатора — деталі нижче) — жодних ручних `if`
 для перевірки заголовка чи тіла запиту немає, все це робить спека.
 
+## Курсовий проєкт: записка для рев'юера
+
+Marketplace API на NestJS: покупець оформлює замовлення, склад і баланс списуються
+**однією транзакцією** разом із подією в `outbox`, подія доїжджає до споживача через
+RabbitMQ, статус замовлення змінює продавець, а власник бачить зміну і запитом, і
+push-ом (WebSocket/SSE). Дані лежать у Postgres і переживають перезапуск. Нижче —
+рішення, їхня ціна і те, чим кожен блок ТЗ підтверджується командою.
+
+### Головний наскрізний контур
+
+Одна команда проходить його на запущеному застосунку (піднімає Nest у процесі, сама
+перевіряє інваріанти, `exit ≠ 0` на порушенні, друкує лише `ключ=число`):
+
+```bash
+docker compose up -d --wait db pgbouncer      # RabbitMQ потрібен лише для async-демо
+# JWT_*, REFRESH_TOKEN_PEPPER, STORAGE_* — з vault або export-ом (див. розділ Grading → курсовий)
+npm run build && npm run migrate && npm run demo:contour
+# product-created=201 anon=401 no-key=400 bad-body=400 created=201 replay=201 read=200
+# foreign=403 oversell=409 packed=200 orders-for-key=1 outbox=1 stock-spent=2
+```
+
+| Ланка ТЗ | Що відбувається | Де в коді / чим доведено |
+|---|---|---|
+| 1. клієнт викликає API | `POST /orders` з `Idempotency-Key` | `src/orders/orders.controller.ts` |
+| 2. валідація | тіло й заголовок звіряє `openapi.yaml` (запит **і** відповідь) | `src/main.ts`; `no-key=400`, `bad-body=400` |
+| 3. права | глобальний `AuthGuard` (401) → `RolesGuard` (403); власність — у сервісі | `src/auth/*`; `anon=401`, `foreign=403` |
+| 4. бізнес-логіка | `checkout()`: атомарний `UPDATE … WHERE stock >= n`, списання балансу | `src/checkout.ts`; `oversell=409` |
+| 5. збереження | `orders` + `order_items` у Postgres, схема під міграціями | `src/migrations/*`; перезапуск не губить дані |
+| 6. фонова обробка | `outbox` → relay (`FOR UPDATE SKIP LOCKED`) → RabbitMQ → споживач з ідемпотентним ефектом | `src/outbox/*`, `npm run demo:outbox` |
+| 7. повторне читання | `GET /orders/:id` окремим запитом, `PATCH …/status` → знову `GET` | `read=200`, `packed=200` |
+| 8. спостережуваність | pino + trace_id, RED-метрики, Grafana-дашборд (окремий зріз, див. нижче) | розділ [Observability](#observability) |
+| 9. тест | `npm run test:e2e` (supertest, повний `AppModule`, справжній Postgres) | `test/e2e/orders.e2e-spec.ts` |
+| 10. розгорнуте середовище | kind + Pulumi у CI, образ за digest; AWS-стек зі знесенням | розділи [Kubernetes](#kubernetes-hw-28), [CI/CD](#cicd) |
+
+### Перевірка домену
+
+Домен — маркетплейс (дефолт курсу). Кожен рядок прив'язаний до своєї операції:
+
+| # | Вимога до домену | У цьому проєкті | Закрито |
+|---|---|---|---|
+| 1 | Сутність із життєвим циклом | `order`: `new → packed → shipped → delivered`, `cancelled` | так |
+| 2 | Обмежений ресурс під конкуренцією | `products.stock`, 60 паралельних `checkout()` → рівно `stock` успішних | так |
+| 3 | Незворотна операція з ідемпотентністю | оплата/checkout, `Idempotency-Key` на краю + `idempotency_keys` у транзакції | так |
+| 4 | Обробка після коміту | outbox → RabbitMQ → споживач; BullMQ для відкладених задач | так |
+| 5 | Ролі та власність | `customer` / `seller` / `admin`; покупець бачить лише власні замовлення | так |
+| 6 | Push зміни стану | socket.io-кімнати `orders:<id>` + SSE з `Last-Event-ID` | так |
+| 7 | Великі об'єкти | presigned upload, multipart з відновленням, закритий бакет за edge-кешем | так |
+
+### Ключові рішення: обрав X, бо Y, інакше Z
+
+| Обрав | Бо | Інакше коштувало б |
+|---|---|---|
+| Атомарний `UPDATE … WHERE stock >= n RETURNING` замість `SELECT … FOR UPDATE` | перевірка і лок — один statement, вікна між «прочитав» і «списав» немає | довгі локи на рядках товару і ризик deadlock; `demo:race` це міряє |
+| Transactional outbox замість `publish` після `COMMIT` | запис замовлення і подія — один `COMMIT`, брокер не вміє відкочуватись | падіння між `COMMIT` і підтвердженням брокера губить подію (dual-write) |
+| At-least-once + ідемпотентний споживач (`ON CONFLICT DO NOTHING`) замість «exactly-once» | exactly-once між БД і брокером недосяжний; дубль безпечний, втрата — ні | або втрата подій, або подвійний ефект (подвійний платіж) |
+| Ключ ідемпотентності = `покупець:Idempotency-Key`, намір, а не хеш тіла | два однакові легітимні замовлення не схлопуються; чужий ключ не відкриває чужий результат | колізія між користувачами або «з'їдені» повторні покупки |
+| ES256 JWT + непрозорий refresh (у БД лише HMAC) + денилист у Postgres | вкрадений токен живе скінченно; логаут і відкликання сім'ї — одна транзакція, без dual-write | довгоживучі токени або розсинхрон Redis↔БД при логауті |
+| Спека — контракт і рантайм-валідатор (`validateRequests` + `validateResponses`) | розбіжність коду й контракту ловить машина, у контролерах немає ручних `if` | дрейф між документом і кодом, помітний лише клієнтам |
+| Keyset-курсор (`WHERE id > $1 … LIMIT n+1`) замість `OFFSET` | сторінки не дублюють і не гублять рядки при вставках; стабільна ціна на глибоких сторінках | `OFFSET` деградує лінійно і «пливе» під записом |
+| Два Redis (`allkeys-lru` для кешу, `noeviction`+AOF для черги й сесій) | політики витіснення несумісні: кеш мусить забувати, черга — ні | evict-нута задача або кеш, що ніколи не звільняє пам'ять |
+| TypeORM `DataSource` у Nest будується з `DB_URL` + файлу з паролем, а не з `DB_*` | два шляхи підключення не змішуються, ротація пароля працює й для `checkout()` | другий набір секретів у сервері й розсинхрон при ротації |
+| Observability і K8s — окремі `node:http` зрізи, не Nest-монолітом | монолітові залежності (брокер, Redis, S3) не вміщаються в kind і ускладнюють вимір | неможливість повторити вимір `failed=0` у CI на раннері |
+
+### Журнал рішень
+
+| ДЗ | Що змінилось | Чому |
+|---|---|---|
+| 9 | OpenAPI-контракт + `express-openapi-validator` | контракт до коду, звіряє машина |
+| 11 | zod-конфіг, секрети поза git/образом, ротація пароля БД | fail-fast на старті, нуль рестартів при ротації |
+| 12–13 | схема, індекси з EXPLAIN до/після, TypeORM-міграції | `Seq Scan → Index Scan`, N+1 зведено до константи |
+| 14 | транзакційний checkout, воркер-пул, retry на `40001/40P01` | немає oversell при 50+ паралельних викликах |
+| 15 | PgBouncer (transaction mode), бекап + restore-drill | відновлюваність доведена `MATCH`, RTO/RPO названо числами |
+| 16 | integration/e2e/contract-тести | драбина довіри над кодом |
+| 18–19 | realtime, RabbitMQ | push без опитування; брокер із DLQ |
+| 22 | outbox + ідемпотентність | прибрано dual-write з hw-19 |
+| 23 | Redis: кеш, сесії, rate-limit, BullMQ | single-flight проти stampede |
+| 24 | ES256, ротація refresh з детекцією повтору, RBAC | 401 ≠ 403, вкрадений токен не вічний |
+| 26 | файли: presigned, multipart, edge-кеш | байти йдуть повз сервіс |
+| 28 | distroless-образ, kind + Pulumi | оновлення під навантаженням з `failed=0` |
+| 29 | pino + OTel + RED, дашборд файлом | корелятор `trace_id`, а не власний uuid |
+| 31 | AWS: бюджет першим, VPC, RDS, ALB, нічний знос | шість нулів у CI після знесення |
+| 32 | CI/CD: чотири гейти, збірка один раз, деплой за digest, OIDC | жодного довгоживучого ключа в налаштуваннях репозиторію |
+| **фінал** | **HTTP-контур переїхав з in-memory на Postgres**: `POST /orders` іде через `checkout()` з outbox і ключем ідемпотентності, `GET`/список читають таблиці | у ТЗ дані мусять бути постійними; раніше шлях у БД мав лише CLI-контур, а Nest віддавав масиви з пам'яті |
+
+### Блок → шлях → чим замінено
+
+| Блок ТЗ | Шлях | Чим замінено і чому |
+|---|---|---|
+| 11.1 Архітектура, конфіг | курсу | — (записка цього розділу, zod-схема, `check:env`) |
+| 11.2 Контур, API | курсу | `express-openapi-validator` (варіант Б) + Pact-контракт; checkout + outbox + споживач |
+| 11.3 Дані | курсу | TypeORM, PgBouncer, `pg_dump -Fc` + restore-drill, два Redis |
+| 11.3 Файли | власний сервер | RustFS замість MinIO: `minio/minio` прибрано з Docker Hub; властивість та сама (S3 API, presigned) |
+| 11.4 Автентифікація, авторизація, секрети | курсу | `jsonwebtoken` ES256, RBAC двох рівнів, Infisical через `with-secrets.sh` |
+| 11.4 Захист краю | частково | rate-limit (`demo:ratelimit`) є як модуль і демо, **у Nest не підключений**; вебхук провайдера **не реалізовано** — −1 бал рядка |
+| 11.5 Фон, події | курсу | RabbitMQ (quorum, DLX), outbox + relay, BullMQ, socket.io + SSE |
+| 11.6 Docker, деплой | курсу | distroless + BuildKit-секрет, kind + Pulumi, CI-деплой за digest, AWS-стек зі знесенням |
+| 11.7 Health, логи, метрики | власний зріз | pino/OTel/RED/дашборд — в окремому `node:http`-зрізі, **Nest не інструментований**; у Nest — `/health` (liveness) і `/health/db` (readiness) |
+| 11.7 Тести, pipeline | курсу | Jest + testcontainers (integration, e2e, contract), GitHub Actions з гейтами в обидва боки |
+
+### Схема архітектури
+
+```mermaid
+flowchart LR
+  C[Клієнт] -->|HTTP + Bearer| N[NestJS API]
+  C -.->|WS / SSE| N
+  subgraph Nest
+    N --> V[OpenAPI-валідатор<br/>запит + відповідь]
+    V --> G[AuthGuard → RolesGuard]
+    G --> S[OrdersService / ProductsService]
+  end
+  S -->|checkout: одна транзакція| PB[(PgBouncer)]
+  PB --> PG[(Postgres:<br/>orders, stock, balance,<br/>idempotency_keys, outbox)]
+  PG -->|SELECT … SKIP LOCKED| R[outbox relay]
+  R -->|publish + confirm| MQ{{RabbitMQ}}
+  MQ --> W[споживач<br/>ON CONFLICT DO NOTHING]
+  W --> PG
+  S -->|status → bus| N
+  N --> RC[(Redis: кеш / черга)]
+  N --> S3[(S3-сумісне сховище<br/>presigned URL)]
+```
+
+### Усі змінні оточення
+
+Джерело правди — `src/config/env.schema.ts`; `npm run check:env` звіряє його з
+`.env.example`. «vault» — значення приходить через `scripts/with-secrets.sh`
+(Infisical; грейдер ставить їх сам при `SKIP_VAULT=1`).
+
+| Змінна | Обов'язкова | Дефолт | Джерело |
+|---|---|---|---|
+| `NODE_ENV`, `PORT` | ні | `development`, `3000` | `.env` / оточення |
+| `DB_URL` | так | — | vault (без пароля, у git лише фейк) |
+| `DB_PASSWORD_FILE` | ні | `./secrets/db_password` | `.env`; сам пароль — файл поза git |
+| `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, `JWT_KID` | так | — (навмисно без дефолту) | vault |
+| `JWT_PREVIOUS_KID`, `JWT_PREVIOUS_PUBLIC_KEY` | ні | — | vault, лише на час ротації ключа |
+| `REFRESH_TOKEN_PEPPER` | так | — | vault |
+| `ACCESS_TOKEN_TTL_SEC`, `REFRESH_TOKEN_TTL_SEC` | ні | `600`, `604800` | оточення |
+| `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_BUCKET` | так | — | vault |
+| `STORAGE_ENDPOINT`, `STORAGE_REGION` | ні | —, `us-east-1` | оточення |
+| `STORAGE_PUT_EXPIRES_SEC`, `STORAGE_PART_EXPIRES_SEC`, `STORAGE_GET_EXPIRES_SEC` | ні | `300`, `900`, `60` | оточення |
+| `STORAGE_MULTIPART_THRESHOLD` | ні | `8388608` | оточення |
+| `DB_HOST/PORT/USER/PASSWORD/NAME`, `BROKER_URL`, `REDIS_URL`, `REDIS_QUEUE_URL` | лише CLI-шлях | — | vault / `SKIP_VAULT=1`; свідомо **не** в схемі сервера |
+
+### OWASP Top 10:2025
+
+| Категорія | Застосовна | Що зроблено / чому не робимо |
+|---|---|---|
+| A01 Broken Access Control | так | усе закрите, поки немає `@Public()`; роль — гард, власність — сервіс (`WHERE id AND buyer_id` логіка в `getOwned`); `demo:rbac` |
+| A02 Security Misconfiguration | так | zod-схема валідує конфіг на старті, ключі без дефолтів; distroless без shell, `USER 65532` |
+| A03 Software Supply Chain Failures | так | `npm ci` за lock-файлом, усі `uses:` у CI закріплені 40-символьним SHA, сканер образу з порогом |
+| A04 Cryptographic Failures | так | ES256 з allowlist алгоритмів, refresh лише як HMAC у БД, паролі — хеш із сіллю; секрети поза git і шарами образу |
+| A05 Injection | так | усі запити параметризовані (`$1…`), `product_id`/`id` проходять перевірку `^\d+$` до SQL; ім'я файлу клієнта не потрапляє в ключ об'єкта |
+| A06 Insecure Design | так | ідемпотентність незворотної операції, outbox, ключ прив'язаний до покупця, `buyer_id` з тіла ігнорується |
+| A07 Authentication Failures | так | скінченний TTL access, ротація refresh з детекцією повтору → відкликання сім'ї, денилист `jti` при логауті |
+| A08 Software or Data Integrity Failures | так | образ деплоїться за digest, збирається один раз; OIDC-гейт перевіряє підпис токена; споживач дедуплікує подію за `event_id` |
+| A09 Security Logging and Alerting Failures | частково | структурні логи з `trace_id` і `redact` секретів, лог відкликання сім'ї — у зрізі observability; Nest-застосунок поки не інструментований, алертів немає |
+| A10 Mishandling of Exceptional Conditions | так | єдиний `problem+json` для всіх помилок, відкат транзакції цілком при нестачі, retry лише на `40001/40P01`, `pool.on('error')` не дає впасти процесу |
+
 ## Структура
 
 ```
-openapi/openapi.yaml    — контракт: 2 ресурси (products, orders), 6 операцій
+openapi/openapi.yaml    — контракт: 3 ресурси (products, orders, auth), 10 операцій
 scripts/check-spec.cjs  — перевірка обсягу спеки (операції/ресурси/Idempotency-Key)
 scripts/realtime-demo.mjs — headless-демо ізоляції WS-кімнат (hw-18)
 src/
@@ -99,7 +268,9 @@ src/
                                    перевірка власника замовлення (hw-18)
 ```
 
-Дані — in-memory (масиви в сервісах), без БД.
+Дані — у Postgres (таблиці hw-12/13). `ProductsService`/`OrdersService` читають через `pg.Pool`
+(`PG_POOL`), а `POST /orders` викликає `checkout()` на TypeORM `DataSource` (`DATA_SOURCE`) — обидва
+будуються з `DB_URL` і файла з паролем (див. розділ [Курсовий проєкт](#курсовий-проєкт-записка-для-ревюера)).
 
 Чому два обробники помилок, а не один. `express-openapi-validator` валідує
 запит/відповідь ще на рівні звичайного express-мідлвара — ДО того, як
@@ -639,10 +810,9 @@ npm run verify:provider    # Pact provider verification (локальний фа
 - без змінної — `pactUrls: [pacts/marketplace-web-marketplace-api.json]` (базовий acceptance-критерій, брокер не потрібен);
 - зі змінною — `pactBrokerUrl` + `publishVerificationResult: true` (той самий виклик, яким користуються CI-джоба `contract` і локальний гейт нижче).
 
-`stateHandlers` тут НЕ сідять БД: ресурси цього API (`products`/`orders`) —
-in-memory (Postgres обслуговує лише
-`/health/db` і ротацію пароля), товар `p1` з інтеракції контракту завжди
-присутній у каталозі — стан-хендлер лишається no-op з поясненням у коді.
+`stateHandlers` сідають БД: каталог тепер у Postgres, тому стан «product 1 exists»
+вставляє товар з `id = 1` (`OVERRIDING SYSTEM VALUE` — `id` у схемі `GENERATED ALWAYS`)
+на чисту базу тестового контейнера.
 
 ### Підняти брокер локально
 
@@ -2209,37 +2379,43 @@ grep -rnE "PACT_BROKER_TOKEN[[:space:]]*[:=][[:space:]]*['\"][^'\"$]" --include=
 
 ### hw-18 (realtime: WebSocket + SSE)
 
-Без сховища — `SKIP_VAULT=1` не потрібен, realtime-шар БД не чіпає взагалі
-(products/orders курсового HTTP-шару — in-memory). Потрібен лише піднятий
-застосунок (`o1` — замовлення з seed-даних, є завжди):
+Каталог і замовлення тепер у Postgres, а все, крім `GET /products`, закрите токеном
+(hw-24), тож блок спершу піднімає `db`/`pgbouncer`, накочує міграції й виписує
+токени тим самим `demo:*`-обладнанням. Потрібен лише піднятий застосунок і замовлення, яке
+створює сам блок:
 
 ```bash
-npm ci
-npm run build
-npm start &
-sleep 2   # дати застосунку піднятись
+docker compose up -d --wait db pgbouncer
+# DB_*, JWT_*, REFRESH_TOKEN_PEPPER, STORAGE_* — як у блоці hw-24 нижче (SKIP_VAULT=1)
+npm ci && npm run build && npm run migrate
 
-# SSE-заголовок
-curl -sN --max-time 2 -D - -o /dev/null http://localhost:3000/orders/o1/events | grep -i '^content-type'
+# `npm start` піднімає сервер; токени покупця й продавця беремо логіном
+npm start &
+sleep 3
+BASE=http://localhost:3000
+
+# SSE-заголовок і формат подій — на замовленні, створеному через API
+# (покупець і продавець — користувачі з demo:contour; створити: npm run demo:contour)
+# Далі ORDER_ID/TOKEN_BUYER/TOKEN_SELLER — id замовлення і access-токени з POST /auth/login:
+curl -sN --max-time 2 -D - -o /dev/null -H "Authorization: Bearer $TOKEN_BUYER" "$BASE/orders/$ORDER_ID/events" | grep -i '^content-type'
 # text/event-stream
 
-# Формат подій: паралельно міняємо статус і одразу читаємо потік
-( sleep 0.3; curl -s -X PATCH http://localhost:3000/orders/o1/status \
+( sleep 0.3; curl -s -X PATCH "$BASE/orders/$ORDER_ID/status" -H "Authorization: Bearer $TOKEN_SELLER" \
     -H 'content-type: application/json' -d '{"status":"packed"}' >/dev/null ) &
-curl -sN --max-time 3 http://localhost:3000/orders/o1/events
+curl -sN --max-time 3 -H "Authorization: Bearer $TOKEN_BUYER" "$BASE/orders/$ORDER_ID/events"
 # id: 1
 # event: order.status
-# data: {"id":1,"orderId":"o1","status":"packed","ts":"..."}
+# data: {"id":1,"orderId":"<ORDER_ID>","status":"packed","ts":"..."}
 
-# Last-Event-ID: щонайменше 4 зміни статусу (id 1..N, N>=4), тоді
-for s in shipped delivered new packed; do
-  curl -s -X PATCH http://localhost:3000/orders/o1/status \
-    -H 'content-type: application/json' -d "{\"status\":\"$s\"}" >/dev/null
+# Last-Event-ID: щонайменше 4 зміни статусу, тоді
+for st in shipped delivered new packed; do
+  curl -s -X PATCH "$BASE/orders/$ORDER_ID/status" -H "Authorization: Bearer $TOKEN_SELLER" \
+    -H 'content-type: application/json' -d "{\"status\":\"$st\"}" >/dev/null
 done
-curl -sN --max-time 2 -H 'Last-Event-ID: 3' http://localhost:3000/orders/o1/events | grep '^id:' | head -1
+curl -sN --max-time 2 -H "Authorization: Bearer $TOKEN_BUYER" -H 'Last-Event-ID: 3' "$BASE/orders/$ORDER_ID/events" | grep '^id:' | head -1
 # id > 3 (пропущене доїхало, дублів нема)
 
-# Ізоляція кімнат — основний і контрольний прогони
+# Ізоляція кімнат — основний і контрольний прогони (PRODUCT_ID — id товару зі stock > 0)
 node scripts/realtime-demo.mjs;             echo "exit=$?"
 # A_RECEIVED=1 · B_RECEIVED=0 · exit=0
 node scripts/realtime-demo.mjs --same-room; echo "exit=$?"
@@ -2553,27 +2729,28 @@ grep -c 'application/problem+json' openapi/openapi.yaml    # >= 2
 
 ## Перевірка застосунку (acceptance criteria, варіант Б)
 
-Після `npm start`:
+З hw-24 усе, крім каталогу, закрите токеном, а дані — у Postgres, тож «голі» `curl` без
+токена дають `401`. Повна перевірка валідації, прав і збереження — одна команда
+(`DB_*`/`JWT_*` — як у блоці Grading нижче):
+
+```bash
+npm run demo:contour
+# no-key=400 (немає Idempotency-Key) · bad-body=400 (порожній items) · anon=401
+# created=201 · replay=201 (той самий id) · read=200 · foreign=403 · oversell=409
+```
+
+Руками (після `npm start` і логіну, `TOKEN` — access-токен покупця):
 
 ```bash
 # Без Idempotency-Key -> 400 + application/problem+json
-curl -i -X POST http://localhost:3000/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"items":[{"product_id":"p1","quantity":2}]}'
+curl -i -X POST http://localhost:3000/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"items":[{"product_id":"1","quantity":2}]}'
 
 # Порожній items -> 400, деталь від валідатора
-curl -i -X POST http://localhost:3000/orders \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: key-1' \
-  -d '{"items":[]}'
+curl -i -X POST http://localhost:3000/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: key-1' -d '{"items":[]}'
 
-# Валідний запит -> 201
-curl -i -X POST http://localhost:3000/orders \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: key-1' \
-  -d '{"items":[{"product_id":"p1","quantity":2}]}'
-
-# Список товарів з cursor-пагінацією
+# Список товарів з cursor-пагінацією (каталог публічний)
 curl -s "http://localhost:3000/products?limit=2"
 
 # 404 у форматі problem+json
@@ -2634,3 +2811,38 @@ npm run demo:rbac              # anon=401 own=200 foreign=403 role-denied=403 ro
 
 Якщо `docker compose` вже піднято раніше без `--wait` на `db`, перевір
 `docker compose ps`: `db` і `pgbouncer` мають бути `healthy`.
+
+### Курсовий (фінальне ТЗ)
+
+Без vault: `SKIP_VAULT=1`. Ті самі змінні, що в блоці hw-24, плюс фейкові `STORAGE_*`
+(застосунок вимагає їх у схемі, контур файлів тут не чіпається). RabbitMQ потрібен лише
+для async-демо; контур `demo:contour` його не торкається — подія лягає в `outbox` тією
+самою транзакцією.
+
+```bash
+docker compose up -d --wait db pgbouncer rabbitmq
+
+export DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=marketplace DB_PASSWORD=dev_secret_pw DB_NAME=marketplace
+export BROKER_URL=amqp://app:app@127.0.0.1:5672
+export SKIP_VAULT=1
+# JWT_KID / JWT_PRIVATE_KEY / JWT_PUBLIC_KEY / REFRESH_TOKEN_PEPPER — одноразова ES256-пара з блоку hw-24
+export STORAGE_ACCESS_KEY=grader-access STORAGE_SECRET_KEY=grader-secret STORAGE_BUCKET=grader-bucket
+
+npm ci
+npx tsc --noEmit
+npm run build
+npm run check:env && npm run lint:spec && npm run check:spec
+
+npm run migrate && npm run migrate:revert && npm run migrate   # міграції з робочим відкатом
+
+npm run demo:contour       # головний контур: created=201 replay=201 read=200 oversell=409 outbox=1 stock-spent=2
+npm run demo:race          # 60 паралельних checkout: успішних = stock, відʼємних 0
+npm run demo:outbox        # requests=2 orders=1 outbox=1 effect=1
+npm run demo:rbac          # anon=401 own=200 foreign=403 role-denied=403 tampered=401
+
+npm run test:integration && npm run test:integration   # справжній Postgres, два зелені прогони
+npm run test:e2e           # POST /orders → GET /orders/:id через Postgres
+npm run test:contract && npm run verify:provider       # Pact: стан-хендлер сіє товар id=1
+```
+
+Тести піднімають Postgres через testcontainers, тож docker має бути доступний.

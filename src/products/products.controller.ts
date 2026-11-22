@@ -9,7 +9,7 @@ export class ProductsController {
   // Каталог читають усі, навіть анонімно.
   @Public()
   @Get()
-  list(
+  async list(
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
     @Query('cursor') cursor?: string,
   ) {
@@ -18,7 +18,7 @@ export class ProductsController {
 
   @Public()
   @Get(':id')
-  getOne(@Param('id') id: string) {
+  async getOne(@Param('id') id: string) {
     return this.products.getById(id);
   }
 
@@ -27,7 +27,7 @@ export class ProductsController {
   @Roles('seller', 'admin')
   @Post()
   @HttpCode(201)
-  create(@Body() body: { name: string; price_cents: number }) {
-    return this.products.create(body.name, body.price_cents);
+  async create(@Body() body: { name: string; price_cents: number; stock?: number }) {
+    return this.products.create(body.name, body.price_cents, body.stock);
   }
 }

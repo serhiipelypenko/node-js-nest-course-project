@@ -41,6 +41,7 @@
     "demo:auth": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-auth.js",
     "demo:reuse": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-reuse.js",
     "demo:rbac": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-rbac.js",
+    "demo:contour": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-contour.js",
     "auth:fingerprint": "bash scripts/with-secrets.sh dev node scripts/jwt-fingerprint.mjs",
     "demo:upload": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-upload.js",
     "demo:multipart": "npm run build --silent && bash scripts/with-secrets.sh dev node dist/demo-multipart.js",

@@ -17,10 +17,18 @@ runDemo('demo:rbac', async (d) => {
   const stranger = await d.login('demo-stranger@auth.test');
   const seller = await d.login('demo-seller@auth.test');
 
+  // Каталог тепер у Postgres: товар зі складом створюємо тут (sku стабільний —
+  // повторний прогін не плодить дублів).
+  const { rows } = await d.pool.query<{ id: string }>(
+    `INSERT INTO products (sku, name, price, stock) VALUES ('demo-rbac-sku', 'Товар для demo:rbac', 100.00, 1000000)
+       ON CONFLICT (sku) DO UPDATE SET stock = 1000000
+     RETURNING id::text`,
+  );
+
   const created = await d.call('POST', '/orders', {
     token: owner.access_token,
-    headers: { 'Idempotency-Key': 'demo-rbac-order-1' },
-    body: { items: [{ product_id: 'p1', quantity: 1 }] },
+    headers: { 'Idempotency-Key': `demo-rbac-order-${Date.now()}` },
+    body: { items: [{ product_id: rows[0]!.id, quantity: 1 }] },
   });
   d.invariant(`замовлення створено (POST /orders -> ${created.status})`, created.status === 201);
   const path = `/orders/${created.body.id}`;

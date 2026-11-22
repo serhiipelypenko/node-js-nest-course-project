@@ -1,7 +1,11 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { Pool } from 'pg';
+import type { DataSource } from 'typeorm';
 import type { AuthUser } from '../auth/auth.types';
-import { Page, paginate } from '../common/cursor';
-import { ProductsService } from '../products/products.service';
+import { checkout } from '../checkout';
+import { decodeKeyCursor, keysetPage, Page } from '../common/cursor';
+import { DATA_SOURCE, PG_POOL } from '../database/database.module';
+import { isDbId } from '../products/products.service';
 import { OrderEventsService } from './order-events.service';
 
 export interface OrderItem {
@@ -9,10 +13,10 @@ export interface OrderItem {
   quantity: number;
 }
 
-// Незалежний від `OrderStatus` у src/entities/order.entity.ts (hw-13/14) —
-// той описує СПРАВЖНЮ таблицю orders у Postgres data-шару, цей — in-memory
-// каталог HTTP-шару. Лінійний перебіг
+// Статуси ПУБЛІЧНОГО контракту (openapi.yaml). Лінійний перебіг
 // new -> packed -> shipped -> delivered, cancelled — у будь-який момент.
+// У таблиці orders «new» зберігається як `paid` (checkout списує кошти одразу);
+// маппінг в обидва боки — нижче, в одному місці.
 export type OrderStatus = 'new' | 'packed' | 'shipped' | 'delivered' | 'cancelled';
 
 export const ORDER_STATUSES: readonly OrderStatus[] = [
@@ -23,12 +27,18 @@ export const ORDER_STATUSES: readonly OrderStatus[] = [
   'cancelled',
 ];
 
+const API_TO_DB: Record<OrderStatus, string> = {
+  new: 'paid',
+  packed: 'packed',
+  shipped: 'shipped',
+  delivered: 'delivered',
+  cancelled: 'cancelled',
+};
+
 export interface Order {
   id: string;
-  // Хто власник замовлення — потрібен gateway (orders.gateway.ts), щоб
+  // Власник замовлення — sub токена. Потрібен gateway (orders.gateway.ts), щоб
   // відмовляти анонімному/чужому клієнту в join у кімнату orders:<id>.
-  // За замовчуванням 'guest' — щоб POST /orders без buyer_id (як у hw-16
-  // e2e/contract тестах) і далі повертав 201, а не 400.
   buyer_id: string;
   items: OrderItem[];
   total_cents: number;
@@ -36,47 +46,43 @@ export interface Order {
   created_at: string;
 }
 
-const ORDERS: Order[] = [
-  {
-    id: 'o1',
-    buyer_id: 'u1',
-    items: [{ product_id: 'p1', quantity: 1 }],
-    total_cents: 129900,
-    status: 'new',
-    created_at: '2026-08-01T10:00:00.000Z',
-  },
-  {
-    id: 'o2',
-    buyer_id: 'u2',
-    items: [
-      { product_id: 'p2', quantity: 2 },
-      { product_id: 'p3', quantity: 1 },
-    ],
-    total_cents: 45900 * 2 + 12900,
-    status: 'new',
-    created_at: '2026-08-02T11:30:00.000Z',
-  },
-];
-let nextId = 3;
+// Одне замовлення = один запит: позиції збираються json_agg-ом у тому ж SELECT
+// (не N+1). Суми — в копійках цілим числом, статус — у термінах API.
+const ORDER_SELECT = `
+  SELECT o.id::text AS id,
+         o.buyer_id::text AS buyer_id,
+         CASE o.status WHEN 'paid' THEN 'new' WHEN 'pending' THEN 'new'
+                       WHEN 'refunded' THEN 'cancelled' ELSE o.status END AS status,
+         round(o.total_amount * 100)::int AS total_cents,
+         o.created_at,
+         COALESCE(
+           json_agg(json_build_object('product_id', i.product_id::text, 'quantity', i.quantity)
+                    ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL),
+           '[]'::json) AS items
+  FROM orders o
+  LEFT JOIN order_items i ON i.order_id = o.id`;
+
+interface OrderRow extends Omit<Order, 'created_at'> {
+  created_at: Date;
+}
+
+function toOrder(row: OrderRow): Order {
+  return { ...row, created_at: row.created_at.toISOString() };
+}
 
 @Injectable()
 export class OrdersService {
   constructor(
-    private readonly products: ProductsService,
+    @Inject(PG_POOL) private readonly pool: Pool,
+    @Inject(DATA_SOURCE) private readonly dataSource: DataSource,
     private readonly orderEvents: OrderEventsService,
   ) {}
 
-  list(limit: number, cursor?: string): Page<Order> {
-    return paginate(ORDERS, limit, cursor);
-  }
-
   // Рівень ВЛАСНОСТІ (hw-24). Перевіряється тут, ПІСЛЯ завантаження ресурсу, а
-  // не в гарді: гард стоїть до handler-а й не знає buyer_id замовлення — щоб
-  // його дізнатись, довелося б ходити по ресурс двічі. Зі справжньою БД це був
-  // би один запит `… WHERE id = $1 AND buyer_id = $2` (без рядка — 404/403 без
-  // другого round-trip). admin бачить усе.
-  getOwned(id: string, user: AuthUser): Order {
-    const order = this.getById(id);
+  // не в гарді: гард стоїть до handler-а й не знає buyer_id замовлення.
+  // admin бачить усе.
+  async getOwned(id: string, user: AuthUser): Promise<Order> {
+    const order = await this.getById(id);
     if (order.buyer_id !== user.id && user.role !== 'admin') {
       throw new ForbiddenException({
         code: 'not-owner',
@@ -86,43 +92,79 @@ export class OrdersService {
     return order;
   }
 
-  // Список: той самий принцип — фільтр за власником ДО пагінації, а не після.
-  listFor(user: AuthUser, limit: number, cursor?: string): Page<Order> {
-    const visible = user.role === 'admin' ? ORDERS : ORDERS.filter((o) => o.buyer_id === user.id);
-    return paginate(visible, limit, cursor);
+  // Список: фільтр за власником у самому SQL, ДО пагінації, а не після.
+  async listFor(user: AuthUser, limit: number, cursor?: string): Promise<Page<Order>> {
+    const after = cursor ? decodeKeyCursor(cursor) : '0';
+    const own = user.role === 'admin' ? '' : 'AND o.buyer_id = $3';
+    const params: unknown[] = [after, limit + 1];
+    if (own) params.push(user.id);
+    const { rows } = await this.pool.query<OrderRow>(
+      `${ORDER_SELECT}
+       WHERE o.id > $1 ${own}
+       GROUP BY o.id
+       ORDER BY o.id
+       LIMIT $2`,
+      params,
+    );
+    return keysetPage(rows.map(toOrder), limit);
   }
 
-  getById(id: string): Order {
-    const order = ORDERS.find((o) => o.id === id);
-    if (!order) {
+  async getById(id: string): Promise<Order> {
+    const rows = isDbId(id)
+      ? (await this.pool.query<OrderRow>(`${ORDER_SELECT} WHERE o.id = $1 GROUP BY o.id`, [id])).rows
+      : [];
+    if (rows.length === 0) {
       throw new NotFoundException({ detail: `замовлення "${id}" не знайдено` });
     }
-    return order;
+    return toOrder(rows[0]!);
   }
 
-  create(items: OrderItem[], buyerId: string): Order {
-    const totalCents = items.reduce((sum, item) => {
-      const [product] = this.products.findByIds([item.product_id]);
-      return sum + (product?.price_cents ?? 0) * item.quantity;
-    }, 0);
-
-    const order: Order = {
-      id: `o${nextId++}`,
-      buyer_id: buyerId,
-      items,
-      total_cents: totalCents,
-      status: 'new',
-      created_at: new Date().toISOString(),
-    };
-    ORDERS.push(order);
-    return order;
+  // Створення = checkout(): склад, баланс, замовлення, задача й подія в outbox
+  // в ОДНІЙ транзакції. Idempotency-Key привʼязаний до покупця: два різні
+  // користувачі з однаковим рядком ключа не повинні бачити чужі замовлення.
+  async create(
+    items: OrderItem[],
+    buyerId: string,
+    idempotencyKey: string,
+  ): Promise<{ order: Order; replayed: boolean }> {
+    if (!isDbId(buyerId)) {
+      throw new ForbiddenException({ code: 'unknown-buyer', detail: 'покупця не знайдено' });
+    }
+    for (const item of items) {
+      if (!isDbId(item.product_id)) {
+        throw new NotFoundException({ code: 'product-not-found', detail: `товар "${item.product_id}" не знайдено` });
+      }
+    }
+    const result = await checkout(this.dataSource, {
+      buyerId,
+      items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity })),
+      idempotencyKey: `${buyerId}:${idempotencyKey}`,
+    });
+    if (!result.ok) {
+      if (result.reason === 'product_not_found') {
+        throw new NotFoundException({ code: 'product-not-found', detail: 'один із товарів не знайдено' });
+      }
+      throw new ConflictException({
+        code: result.reason === 'out_of_stock' ? 'out-of-stock' : 'insufficient-funds',
+        detail: result.reason === 'out_of_stock' ? 'товару не вистачає на складі' : 'недостатньо коштів на балансі',
+      });
+    }
+    return { order: await this.getById(result.orderId), replayed: result.replayed };
   }
 
   // Бізнес-логіка зміни статусу — і єдине місце, звідки йде emit у realtime-шину.
-  updateStatus(id: string, status: OrderStatus): Order {
-    const order = this.getById(id);
-    order.status = status;
-    this.orderEvents.emitStatusChange(order.id, status);
-    return order;
+  async updateStatus(id: string, status: OrderStatus): Promise<Order> {
+    if (!isDbId(id)) {
+      throw new NotFoundException({ detail: `замовлення "${id}" не знайдено` });
+    }
+    const { rowCount } = await this.pool.query(`UPDATE orders SET status = $2 WHERE id = $1`, [
+      id,
+      API_TO_DB[status],
+    ]);
+    if (rowCount === 0) {
+      throw new NotFoundException({ detail: `замовлення "${id}" не знайдено` });
+    }
+    this.orderEvents.emitStatusChange(id, status);
+    return this.getById(id);
   }
 }

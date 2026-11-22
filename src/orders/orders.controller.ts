@@ -1,4 +1,4 @@
-import { Body, Controller, DefaultValuePipe, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, DefaultValuePipe, Get, Headers, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { AuthUser } from '../auth/auth.types';
 import { CurrentUser, Roles } from '../auth/decorators';
@@ -27,7 +27,7 @@ export class OrdersController {
   ) {}
 
   @Get()
-  list(
+  async list(
     @CurrentUser() user: AuthUser,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
     @Query('cursor') cursor?: string,
@@ -36,7 +36,7 @@ export class OrdersController {
   }
 
   @Get(':id')
-  getOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+  async getOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.orders.getOwned(id, user);
   }
 
@@ -45,20 +45,23 @@ export class OrdersController {
   // немає жодного ручного `if` на цей рахунок.
   @Post()
   @HttpCode(201)
-  create(
+  async create(
     @Body() body: CreateOrderBody,
     @CurrentUser() user: AuthUser,
+    @Headers('idempotency-key') idempotencyKey: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const order = this.orders.create(body.items, user.id);
+    const { order, replayed } = await this.orders.create(body.items, user.id, idempotencyKey);
     res.setHeader('Location', `/orders/${order.id}`);
+    // Повтор того ж ключа — ті самі байти відповіді, але клієнт може відрізнити.
+    if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     return order;
   }
 
   // Рівень РОЛІ: статус веде продавець/адмін, покупець його не переписує.
   @Roles('seller', 'admin')
   @Patch(':id/status')
-  updateStatus(@Param('id') id: string, @Body() body: UpdateOrderStatusBody) {
+  async updateStatus(@Param('id') id: string, @Body() body: UpdateOrderStatusBody) {
     return this.orders.updateStatus(id, body.status);
   }
 
@@ -67,16 +70,16 @@ export class OrdersController {
   // тіло цієї відповіді — нескінченний text/event-stream, а не JSON, який
   // можна звірити зі схемою.
   @Get(':id/events')
-  events(
+  async events(
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,
     @Req() req: Request,
     @Res() res: Response,
-  ): void {
+  ): Promise<void> {
     // Існування замовлення перевіряємо ДО writeHead: NotFoundException звідси
     // ще встигає піти тим самим шляхом, що getOne (ProblemJsonFilter) —
     // після writeHead кидати виняток запізно, заголовки вже пішли.
-    this.orders.getOwned(id, user);
+    await this.orders.getOwned(id, user);
 
     const lastEventId = Number(req.headers['last-event-id'] ?? 0);
 
