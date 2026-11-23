@@ -26,6 +26,8 @@ copy(part(deployEnv, 'rollout.txt'), 'rollout.txt');
 const buildLog = read(join(out, 'build.log'));
 const buildInvocations = buildLog.split('\n').filter(Boolean).length;
 const deploy = kv(read(part(deployEnv, 'deploy.txt')));
+// oidc-* — з out/oidc.txt (пишеться ДО pulumi up), щоб червоний deploy не губив доказ підпису
+const oidc = kv(read(part(deployEnv, 'oidc.txt')));
 const cost = kv(read(part('plan', 'cost.txt')));
 const rollout = kv(read(join(out, 'rollout.txt')));
 
@@ -45,11 +47,11 @@ const lines = {
   'built-digest': e.BUILT_DIGEST ?? '',
   'deployed-digest': deployedDigest,
   'build-invocations': buildInvocations,
-  'creds-source': deploy['oidc-sig-verified'] === '1' ? 'oidc' : 'none',
-  'oidc-iss': deploy['oidc-iss'] ?? '',
-  'oidc-aud': deploy['oidc-aud'] ?? '',
-  'oidc-sub': deploy['oidc-sub'] ?? '',
-  'oidc-sig-verified': deploy['oidc-sig-verified'] ?? 0,
+  'creds-source': oidc['oidc-sig-verified'] === '1' ? 'oidc' : 'none',
+  'oidc-iss': oidc['oidc-iss'] ?? '',
+  'oidc-aud': oidc['oidc-aud'] ?? '',
+  'oidc-sub': oidc['oidc-sub'] ?? '',
+  'oidc-sig-verified': oidc['oidc-sig-verified'] ?? 0,
   'rollout-requests': rollout.requests ?? '',
   'rollout-ok': rollout.ok ?? '',
   'rollout-failed': rollout.failed ?? '',
